@@ -1,0 +1,55 @@
+name: Template Update
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+  - cron: '1 1 1 * *'
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  CLICOLOR: 1
+  TEMPLATE_URL: "https://github.com/skuld-systems/_rust.git"
+  TEMPLATE_BRANCH: "main"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  update:
+    permissions:
+      pull-requests: write
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Configure git
+      run: |
+        git config --global user.name '${{ github.actor }}'
+        git config --global user.email '<>'
+    - name: Fetch template
+      run: "git remote add template ${{ env.TEMPLATE_URL }} && git fetch template ${{ env.TEMPLATE_BRANCH }}"
+      env:
+        GH_TOKEN: ${{ secrets.TEMPLATE_TOKEN }}
+    - name: Merge template
+      run: "git checkout -b template-update && git merge template/${{ env.TEMPLATE_BRANCH }} -m 'chore: Update from template'"
+    - name: Clear any existing branch
+      run: "git push origin --delete template-update"
+      continue-on-error: true
+    - name: Push branch
+      run: "git push --set-upstream origin template-update"
+    - name: Create PR
+      run: "gh pr create --head template-update --title 'chore: Update from template' --body ''"
+      env:
+        GH_TOKEN: ${{ github.token }}
+    - name: Merge PR
+      run: "gh pr merge --auto --delete-branch"
+      env:
+        GH_TOKEN: ${{ github.token }}
