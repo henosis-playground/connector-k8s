@@ -27,12 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       with:
         fetch-depth: 0
+        persist-credentials: false
     - name: Configure git
       run: |
-        git config --global user.name '${{ github.actor }}'
+        git config --global user.name "$GITHUB_ACTOR"
         git config --global user.email '<>'
     - name: Fetch template
       run: "git remote add template ${{ env.TEMPLATE_URL }} && git fetch template ${{ env.TEMPLATE_BRANCH }}"
@@ -43,8 +44,12 @@ jobs:
     - name: Clear any existing branch
       run: "git push origin --delete template-update"
       continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
     - name: Push branch
       run: "git push --set-upstream origin template-update"
+      env:
+        GH_TOKEN: ${{ github.token }}
     - name: Create PR
       run: "gh pr create --head template-update --title 'chore: Update from template' --body ''"
       env:

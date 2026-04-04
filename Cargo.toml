@@ -12,6 +12,7 @@ publish = false
 automod = "1.0.14"
 
 [workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
 unnameable_types = "warn"
 unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "warn"
@@ -81,13 +82,6 @@ verbose_file_reads = "warn"
 wildcard_imports = "warn"
 zero_sized_map_values = "warn"
 
-[profile.dev]
-debug = "line-tables-only"
-panic = "abort"
-
-[profile.dev.package."*"]
-debug = false
-
 [profile.release]
 opt-level = 3
 strip = true
@@ -95,6 +89,19 @@ panic = "abort"
 codegen-units = 1
 lto = true
 
+[profile.dev]
+debug = "line-tables-only"
+panic = "abort"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.debugging]
 inherits = "dev"
 debug = true
+
+[profile.testing]
+inherits = "dev"
+
+[profile.testing.package."*"]
+opt-level = 3
