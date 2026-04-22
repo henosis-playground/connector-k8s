@@ -5,7 +5,7 @@ members = ["crates/*", "tests/*"]
 [workspace.package]
 repository = "REPOSITORY"
 edition = "2024"
-rust-version = "1.94.0"
+rust-version = "1.95.0"
 publish = false
 
 [workspace.dependencies]
@@ -51,7 +51,7 @@ invalid_upcast_comparisons = "warn"
 large_digit_groups = "warn"
 large_stack_arrays = "warn"
 large_types_passed_by_value = "warn"
-let_and_return = "allow"  # sometimes good to name what you are returning
+let_and_return = "allow"                 # sometimes good to name what you are returning
 linkedlist = "warn"
 lossy_float_literal = "warn"
 macro_use_imports = "warn"
