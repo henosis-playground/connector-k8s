@@ -1,0 +1,22 @@
+name: ifttt-lint
+permissions:
+  contents: read
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+jobs:
+  ifttt-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run ifttt-lint
+        # LINT.IfChange(ifttt_lint_version)
+        uses: simonepri/ifttt-lint@fd78cd00909b277420e88d121fc4f1e1deeb10af # v0.10.0
+        # LINT.ThenChange(//.pre-commit-config.yaml:ifttt_lint_version)

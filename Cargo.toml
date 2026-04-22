@@ -5,7 +5,9 @@ members = ["crates/*", "tests/*"]
 [workspace.package]
 repository = "REPOSITORY"
 edition = "2024"
+# LINT.IfChange(msrv)
 rust-version = "1.95.0"
+# LINT.ThenChange(//.github/workflows/ci.yaml:msrv)
 publish = false
 
 [workspace.dependencies]

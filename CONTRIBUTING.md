@@ -17,13 +17,16 @@ will be installed automatically on first `cargo` invocation via `rust-toolchain.
 | [git-cliff](https://github.com/orhun/git-cliff) | `just changelog` — changelog generation |
 | [cargo-nextest](https://github.com/nextest-rs/nextest) | `just test` — test runner |
 | [prek](https://github.com/j178/prek) | `just check-pre-commit` — pre-commit hooks |
+| [Taplo](https://github.com/tamasfe/taplo) | `just fmt` / `just check-fmt` — TOML formatting |
+| [yamlfmt](https://github.com/google/yamlfmt) | `just fmt` / `just check-fmt` — YAML formatting |
 
 Feel free to install these through your preferred package manager. If you don't want to
 bother, all of these tools are also written in Rust. The downside is they won't
 auto-update; rerun the command to update them.
 
 ```sh
-cargo install --locked just cargo-deny cargo-hakari cargo-nextest git-cliff prek
+cargo install --locked just cargo-deny cargo-hakari cargo-nextest git-cliff prek taplo-cli
+go install github.com/google/yamlfmt/cmd/yamlfmt@latest
 ```
 
 ## Workspace Layout
@@ -62,6 +65,8 @@ As a heads up, CI runs the following checks:
 - warnings turned to compile errors
 - `cargo nextest run`
 - `rustfmt`
+- `taplo fmt --check`
+- `yamlfmt -lint`
 - `clippy`
 - `rustdoc`
 - `cargo deny`

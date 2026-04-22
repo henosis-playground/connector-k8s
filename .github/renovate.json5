@@ -18,8 +18,8 @@
         '/Cargo.toml$/',
         '/clippy.toml$/',
         '/\\.clippy.toml$/',
-        '/^\\.github/workflows/ci.yml$/',
-        '/^\\.github/workflows/rust-next.yml$/',
+        '/^\\.github/workflows/ci.yaml$/',
+        '/^\\.github/workflows/rust-next.yaml$/',
       ],
       matchStrings: [
         'STABLE.*?(?<currentValue>\\d+\\.\\d+(\\.\\d+)?)',
@@ -32,7 +32,7 @@
     {
       customType: 'regex',
       managerFilePatterns: [
-        '/^\\.github/workflows/pre-commit.yml$/',
+        '/^\\.github/workflows/pre-commit.yaml$/',
       ],
       matchStrings: [
         'prek-version.*?(?<currentValue>\\d+\\.\\d+(\\.\\d+)?)',
