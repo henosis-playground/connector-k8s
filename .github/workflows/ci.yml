@@ -80,7 +80,7 @@ jobs:
       with:
         tool: cargo-hack
     - name: Check declared MSRV
-      run: cargo hack check --each-feature --locked --rust-version --ignore-private --workspace --all-targets --keep-going
+      run: cargo hack check --each-feature --locked --rust-version --workspace --all-targets --keep-going
   minimal-versions:
     name: Minimal versions
     runs-on: ubuntu-latest
@@ -211,7 +211,7 @@ jobs:
     - name: Install cargo-nextest
       uses: taiki-e/install-action@2408a0e0a4a19f5bf4cf315106fe1cb8fd2bc3cf # cargo-nextest
     - name: Gather coverage
-      run: cargo llvm-cov nextest --workspace --all-features --lcov --output-path lcov.info
+      run: cargo llvm-cov nextest --workspace --all-features --tests --lcov --output-path lcov.info
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
       with:
