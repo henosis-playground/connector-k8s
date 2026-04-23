@@ -210,9 +210,21 @@ jobs:
       uses: taiki-e/install-action@39b03b784b1fb8d2e38e4d6dcf888b991e3c5898 # cargo-llvm-cov
     - name: Install cargo-nextest
       uses: taiki-e/install-action@2408a0e0a4a19f5bf4cf315106fe1cb8fd2bc3cf # cargo-nextest
+    - name: Inventory tests
+      id: test_inventory
+      run: |
+        cargo nextest list --workspace --all-features --tests --message-format json > nextest-list.json
+        count="$(sed -n 's/.*"test-count":\([0-9][0-9]*\).*/\1/p' nextest-list.json | head -n1)"
+        echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
+    - name: Skip coverage
+      if: steps.test_inventory.outputs.count == '0'
+      run: |
+        echo "No tests discovered; skipping coverage generation." >> "$GITHUB_STEP_SUMMARY"
     - name: Gather coverage
+      if: steps.test_inventory.outputs.count != '0'
       run: cargo llvm-cov nextest --workspace --all-features --tests --lcov --output-path lcov.info
     - name: Upload coverage to Codecov
+      if: steps.test_inventory.outputs.count != '0'
       uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
       with:
         token: ${{ secrets.CODECOV_TOKEN }}

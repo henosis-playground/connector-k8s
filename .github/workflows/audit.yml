@@ -25,17 +25,27 @@ jobs:
     name: Audit
     needs: [advisories, cargo_deny, actions]
     runs-on: ubuntu-latest
-    if: "always()"
+    if: "github.event.repository.visibility == 'public' && always()"
     steps:
     - name: Failed
       run: exit 1
       if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')"
+  audit_private_repo:
+    permissions:
+      contents: none
+    name: Audit
+    runs-on: ubuntu-latest
+    if: "github.event.repository.visibility != 'public'"
+    steps:
+    - name: Skip audit checks
+      run: echo "Audit workflow is only enabled for public repositories."
   advisories:
     permissions:
       issues: write
       checks: write
     runs-on: ubuntu-latest
     continue-on-error: true
+    if: "github.event.repository.visibility == 'public'"
     strategy:
       matrix:
         checks:
@@ -55,6 +65,7 @@ jobs:
       issues: write
       checks: write
     runs-on: ubuntu-latest
+    if: "github.event.repository.visibility == 'public'"
     strategy:
       matrix:
         checks:
@@ -75,6 +86,7 @@ jobs:
       security-events: write
       contents: read
       actions: read
+    if: "github.event.repository.visibility == 'public'"
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
