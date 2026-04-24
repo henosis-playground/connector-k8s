@@ -130,16 +130,18 @@ jobs:
         with:
           toolchain: ${{ env.MSRV }}
           components: rustfmt
-      - name: Setup cargo-binstall
-        uses: cargo-bins/cargo-binstall@dc19f1e48450eefe5a29b8da6c6b00a87d730b37 # v1.18.1
       - name: Setup Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: "1.25"
       - name: Install Taplo
-        run: cargo binstall --no-confirm taplo-cli@0.10.0
+        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        with:
+          tool: taplo@0.10.0
       - name: Install just
-        run: cargo binstall --no-confirm just
+        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        with:
+          tool: just
       - name: Install yamlfmt
         run: go install github.com/google/yamlfmt/cmd/yamlfmt@v0.21.0
       - name: Check formatting
@@ -160,13 +162,16 @@ jobs:
         with:
           toolchain: ${{ env.MSRV }}
           components: clippy
-      - name: Setup cargo-binstall
-        uses: cargo-bins/cargo-binstall@dc19f1e48450eefe5a29b8da6c6b00a87d730b37 # v1.18.1
-      - name: Install clippy-sarif
-        run: cargo binstall --no-confirm clippy-sarif
-        if: github.event.repository.visibility == 'public'
-      - name: Install sarif-fmt
-        run: cargo binstall --no-confirm sarif-fmt
+      - name: Install clippy-sarif and sarif-fmt
+        # These crates aren't in taiki-e/install-action's tool manifest, so it
+        # would fall back to cargo-binstall by default — which hits
+        # https://github.com/Swatinem/rust-cache/issues/204 (stale metadata).
+        # Forcing the cargo-install fallback builds from source; slower on a
+        # cold cache but correct, and rust-cache handles the target artifacts.
+        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        with:
+          tool: clippy-sarif,sarif-fmt
+          fallback: cargo-install
         if: github.event.repository.visibility == 'public'
       - name: Check (SARIF)
         run: >
