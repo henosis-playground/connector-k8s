@@ -9,7 +9,7 @@ env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   CLICOLOR: 1
-  TEMPLATE_URL: "https://github.com/skuld-systems/_rust.git"
+  TEMPLATE_REPO: "skuld-systems/_rust"
   TEMPLATE_BRANCH: "main"
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -27,19 +27,27 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true # to push the branch and create PR
+      - name: Checkout template
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.TEMPLATE_REPO }}
+          ref: ${{ env.TEMPLATE_BRANCH }}
+          path: .template
+          token: ${{ secrets.TEMPLATE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Configure git
         run: |
           git config --global user.name "$GITHUB_ACTOR"
           git config --global user.email '<>'
-      - name: Fetch template
-        env:
-          TEMPLATE_TOKEN: ${{ secrets.TEMPLATE_TOKEN }}
-        run: |
-          auth_header="$(printf 'x-access-token:%s' "$TEMPLATE_TOKEN" | base64 -w0)"
-          git remote add template "${{ env.TEMPLATE_URL }}"
-          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth_header}" fetch template "${{ env.TEMPLATE_BRANCH }}"
       - name: Merge template
-        run: "git checkout -b template-update && git merge template/${{ env.TEMPLATE_BRANCH }} -m 'chore: Update from template'"
+        run: |
+          git remote add template ./.template
+          git fetch template "${TEMPLATE_BRANCH}"
+          git checkout -b template-update
+          git merge "template/${TEMPLATE_BRANCH}" -m 'chore: Update from template'
+          git remote remove template
+          rm -rf .template
       - name: Clear any existing branch
         run: "git push origin --delete template-update"
         continue-on-error: true
