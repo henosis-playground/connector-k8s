@@ -19,7 +19,7 @@ repos:
         files: \.yml$
   - repo: https://github.com/crate-ci/typos
     # LINT.IfChange(typos_version)
-    rev: v1.45.0
+    rev: v1.45.1
     # LINT.ThenChange(//.github/workflows/spelling.yaml:typos_version)
     hooks:
       - id: typos
