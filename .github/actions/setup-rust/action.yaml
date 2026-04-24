@@ -38,7 +38,7 @@ runs:
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
     - name: Install cargo-hack
       if: ${{ inputs['cargo-hack'] == 'true' }}
-      uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+      uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2.75.20
       with:
         tool: cargo-hack
     - name: Install cargo-nextest

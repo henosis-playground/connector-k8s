@@ -135,11 +135,11 @@ jobs:
         with:
           go-version: "1.26"
       - name: Install Taplo
-        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2.75.20
         with:
           tool: taplo@0.10.0
       - name: Install just
-        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2.75.20
         with:
           tool: just
       - name: Install yamlfmt
@@ -168,7 +168,7 @@ jobs:
         # https://github.com/Swatinem/rust-cache/issues/204 (stale metadata).
         # Forcing the cargo-install fallback builds from source; slower on a
         # cold cache but correct, and rust-cache handles the target artifacts.
-        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2.75.20
         with:
           tool: clippy-sarif,sarif-fmt
           fallback: cargo-install
