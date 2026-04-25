@@ -43,7 +43,11 @@ runs:
         tool: cargo-hack
     - name: Install cargo-nextest
       if: ${{ inputs['cargo-nextest'] == 'true' }}
-      uses: taiki-e/install-action@61debcf76ed7a18a8e22671693dd552bf6e5c67e # cargo-nextest
+      uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2.75.20
+      with:
+        tool: cargo-nextest
     - name: Install cargo-llvm-cov
       if: ${{ inputs['cargo-llvm-cov'] == 'true' }}
-      uses: taiki-e/install-action@fe523c2f1957c9c709086afaae6c46defc8a41c5 # cargo-llvm-cov
+      uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2.75.20
+      with:
+        tool: cargo-llvm-cov
