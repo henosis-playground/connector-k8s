@@ -3,6 +3,9 @@
   schedule: [
     'before 5am on the first day of the month',
   ],
+  minimumReleaseAge: '3 days',
+  minimumReleaseAgeBehaviour: 'timestamp-required',
+  internalChecksFilter: 'strict',
   semanticCommits: 'enabled',
   commitMessageLowerCase: 'never',
   configMigration: true,
@@ -14,20 +17,17 @@
     {
       customType: 'regex',
       managerFilePatterns: [
-        '/^rust-toolchain\\.toml$/',
-        '/Cargo.toml$/',
-        '/clippy.toml$/',
-        '/\\.clippy.toml$/',
+        '/^Cargo\\.toml$/',
         '/^\\.github/workflows/ci.yaml$/',
-        '/^\\.github/workflows/rust-next.yaml$/',
       ],
       matchStrings: [
-        'STABLE.*?(?<currentValue>\\d+\\.\\d+(\\.\\d+)?)',
-        '(?<currentValue>\\d+\\.\\d+(\\.\\d+)?).*?STABLE',
+        'rust-version\\s*=\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
+        'MSRV:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
       ],
-      depNameTemplate: 'STABLE',
-      packageNameTemplate: 'rust-lang/rust',
-      datasourceTemplate: 'github-releases',
+      depNameTemplate: 'rust-msrv',
+      packageNameTemplate: 'rust',
+      datasourceTemplate: 'rust-version',
+      versioningTemplate: 'rust-release-channel',
     },
     {
       customType: 'regex',
@@ -44,17 +44,32 @@
   ],
   packageRules: [
     {
-      commitMessageTopic: 'Rust Stable',
+      commitMessageTopic: 'Rust toolchain',
+      matchManagers: [
+        'rust-toolchain',
+      ],
+      matchDepTypes: [
+        'toolchain',
+      ],
+      schedule: [
+        '* * * * *',
+      ],
+      minimumReleaseAge: null,
+      automerge: true,
+    },
+    {
+      commitMessageTopic: 'Rust MSRV',
       matchManagers: [
         'custom.regex',
       ],
       matchDepNames: [
-        'STABLE',
+        'rust-msrv',
       ],
-      extractVersion: '^(?<version>\\d+\\.\\d+)',  // Drop the patch version
+      allowedVersions: '/^\\d+\\.\\d+\\.\\d+$/',
       schedule: [
         '* * * * *',
       ],
+      minimumReleaseAge: null,
       automerge: true,
     },
     {

@@ -33,8 +33,6 @@ jobs:
     strategy:
       matrix:
         os: ["ubuntu-latest", "windows-latest", "macos-latest"]
-        rust: ["stable"]
-    continue-on-error: ${{ matrix.rust != 'stable' }}
     runs-on: ${{ matrix.os }}
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -46,7 +44,7 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ env.MSRV }}
           cargo-hack: "true"
           cargo-nextest: "true"
       - name: Build
@@ -199,7 +197,7 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: stable
+          toolchain: ${{ env.MSRV }}
           components: llvm-tools-preview
           cargo-nextest: "true"
           cargo-llvm-cov: "true"

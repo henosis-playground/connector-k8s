@@ -34,6 +34,12 @@ runs:
       with:
         toolchain: ${{ inputs.toolchain }}
         components: ${{ inputs.components }}
+    - name: Select Rust
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+      run: rustup override set "$TOOLCHAIN"
     - name: Initialize cache
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
     - name: Install cargo-hack
