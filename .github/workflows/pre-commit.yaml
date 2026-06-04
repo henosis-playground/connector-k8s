@@ -8,6 +8,9 @@ env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   CLICOLOR: 1
+  # LINT.IfChange(msrv)
+  RUSTUP_TOOLCHAIN: "1.96.0"
+  # LINT.ThenChange(//Cargo.toml:msrv)
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true

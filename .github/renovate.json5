@@ -18,11 +18,13 @@
       customType: 'regex',
       managerFilePatterns: [
         '/^Cargo\\.toml$/',
-        '/^\\.github/workflows/ci.yaml$/',
+        '/^\\.pre-commit-config\\.yaml$/',
+        '/^\\.github/workflows/(audit|ci|ifttt-lint|pre-commit)\\.yaml$/',
       ],
       matchStrings: [
         'rust-version\\s*=\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
-        'MSRV:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
+        'RUSTUP_TOOLCHAIN:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
+        'rust:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
       ],
       depNameTemplate: 'rust-msrv',
       packageNameTemplate: 'rust',
@@ -32,7 +34,7 @@
     {
       customType: 'regex',
       managerFilePatterns: [
-        '/^\\.github/workflows/pre-commit.yaml$/',
+        '/^\\.github/workflows/(ifttt-lint|pre-commit)\\.yaml$/',
       ],
       matchStrings: [
         'prek-version.*?(?<currentValue>\\d+\\.\\d+(\\.\\d+)?)',

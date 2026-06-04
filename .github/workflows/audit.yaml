@@ -10,6 +10,9 @@ env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
   CLICOLOR: 1
+  # LINT.IfChange(msrv)
+  RUSTUP_TOOLCHAIN: "1.96.0"
+  # LINT.ThenChange(//Cargo.toml:msrv)
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
@@ -45,7 +48,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check ${{ matrix.checks }}
-          rust-version: stable
+          rust-version: ${{ env.RUSTUP_TOOLCHAIN }}
   cargo_deny:
     permissions:
       contents: read
@@ -65,7 +68,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check ${{ matrix.checks }}
-          rust-version: stable
+          rust-version: ${{ env.RUSTUP_TOOLCHAIN }}
   actions:
     runs-on: ubuntu-latest
     permissions:

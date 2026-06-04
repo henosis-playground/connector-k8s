@@ -1,4 +1,8 @@
 default_install_hook_types: ["pre-commit", "pre-push", "commit-msg"]
+default_language_version:
+  # LINT.IfChange(msrv)
+  rust: "1.96.0"
+  # LINT.ThenChange(//Cargo.toml:msrv)
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -30,9 +34,7 @@ repos:
     hooks:
       - id: committed
   - repo: https://github.com/simonepri/ifttt-lint
-    # LINT.IfChange(ifttt_lint_version)
     rev: v0.10.5
-    # LINT.ThenChange(//.github/workflows/ifttt-lint.yaml:ifttt_lint_version)
     hooks:
       - id: ifttt-lint
       - id: ifttt-lint-diff

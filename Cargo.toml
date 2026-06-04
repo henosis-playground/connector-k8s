@@ -7,7 +7,13 @@ repository = "REPOSITORY"
 edition = "2024"
 # LINT.IfChange(msrv)
 rust-version = "1.96.0"
-# LINT.ThenChange(//.github/workflows/ci.yaml:msrv)
+# LINT.ThenChange(
+#     //.github/workflows/audit.yaml:msrv,
+#     //.github/workflows/ci.yaml:msrv,
+#     //.github/workflows/ifttt-lint.yaml:msrv,
+#     //.github/workflows/pre-commit.yaml:msrv,
+#     //.pre-commit-config.yaml:msrv,
+# )
 publish = false
 
 [workspace.dependencies]
