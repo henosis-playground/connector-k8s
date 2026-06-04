@@ -6,7 +6,7 @@ members = ["crates/*", "tests/*"]
 repository = "REPOSITORY"
 edition = "2024"
 # LINT.IfChange(msrv)
-rust-version = "1.95.0"
+rust-version = "1.96.0"
 # LINT.ThenChange(//.github/workflows/ci.yaml:msrv)
 publish = false
 
