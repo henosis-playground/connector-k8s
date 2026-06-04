@@ -20,5 +20,5 @@ jobs:
           persist-credentials: false
       - name: Spell Check Repo
         # LINT.IfChange(typos_version)
-        uses: crate-ci/typos@cf5f1c29a8ac336af8568821ec41919923b05a83 # v1.45.1
+        uses: crate-ci/typos@f8a58b6b53f2279f71eb605f03a4ae4d10608f45 # v1.47.0
         # LINT.ThenChange(//.pre-commit-config.yaml:typos_version)
