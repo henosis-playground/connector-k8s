@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly-2026-06-03"
+channel = "nightly-2026-06-04"
 components = [
   "rustc",
   "cargo",
