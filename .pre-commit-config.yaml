@@ -31,7 +31,7 @@ repos:
       - id: committed
   - repo: https://github.com/simonepri/ifttt-lint
     # LINT.IfChange(ifttt_lint_version)
-    rev: v0.10.0
+    rev: v0.10.5
     # LINT.ThenChange(//.github/workflows/ifttt-lint.yaml:ifttt_lint_version)
     hooks:
       - id: ifttt-lint
