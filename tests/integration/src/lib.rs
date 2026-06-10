@@ -1,2 +1,4 @@
 #[cfg(test)]
-mod smoke;
+mod tests {
+    automod::dir!("src/tests");
+}
