@@ -4,8 +4,7 @@ permissions:
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
@@ -23,11 +22,11 @@ jobs:
     name: CI
     needs: [test, msrv, lockfile, docs, formatting, clippy, minimal-versions, coverage]
     runs-on: ubuntu-latest
-    if: "always()"
+    if: always()
     steps:
       - name: Failed
         run: exit 1
-        if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')"
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
   test:
     name: Test
     strategy:
@@ -83,6 +82,7 @@ jobs:
       - name: Compile with minimal versions
         run: cargo +${{ env.RUSTUP_TOOLCHAIN }} check --workspace --all-features --locked --keep-going
   lockfile:
+    name: Lockfile
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -136,7 +136,7 @@ jobs:
       - name: Check formatting
         run: just check-fmt
   clippy:
-    name: clippy
+    name: Clippy
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -194,8 +194,8 @@ jobs:
         id: test_inventory
         run: |
           cargo nextest list --workspace --all-features --tests --message-format json > nextest-list.json
-          count="$(sed -n 's/.*"test-count":\([0-9][0-9]*\).*/\1/p' nextest-list.json | head -n1)"
-          echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
+          count="$(jq -r '."test-count" // 0' nextest-list.json)"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
       - name: Skip coverage
         if: steps.test_inventory.outputs.count == '0'
         run: |

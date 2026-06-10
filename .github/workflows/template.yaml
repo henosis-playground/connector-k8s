@@ -6,9 +6,6 @@ on:
     - cron: '1 1 1 * *'
   workflow_dispatch:
 env:
-  RUST_BACKTRACE: 1
-  CARGO_TERM_COLOR: always
-  CLICOLOR: 1
   TEMPLATE_REPO: "skuld-systems/_rust"
   TEMPLATE_BRANCH: "main"
 concurrency:
@@ -16,6 +13,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   update:
+    name: Update
     environment: template-update
     permissions:
       pull-requests: write

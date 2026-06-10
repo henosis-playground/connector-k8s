@@ -1,5 +1,6 @@
 name: pre-commit
-permissions: {} # none
+permissions:
+  contents: read
 on:
   pull_request:
   push:
@@ -16,8 +17,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   pre-commit:
-    permissions:
-      contents: read
+    name: pre-commit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
