@@ -1,6 +1,6 @@
-# PROJECT
+# {{PROJECT}}
 
-DESCRIPTION
+{{DESCRIPTION}}
 
 This file exists for tools that look for `AGENTS.md`.
 

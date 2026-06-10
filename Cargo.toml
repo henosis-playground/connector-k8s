@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "tests/*"]
 
 [workspace.package]
-repository = "REPOSITORY"
+repository = "{{REPOSITORY}}"
 edition = "2024"
 # LINT.IfChange(msrv)
 rust-version = "1.96.0"

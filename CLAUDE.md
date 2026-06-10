@@ -1,6 +1,6 @@
-# PROJECT
+# {{PROJECT}}
 
-DESCRIPTION
+{{DESCRIPTION}}
 
 ## Layout
 
