@@ -46,6 +46,9 @@
   ],
   packageRules: [
     {
+      // Nightlies release daily; a weekly bump keeps the pinned toolchain
+      // ahead of the latest beta without the churn (and breakage risk) of
+      // tracking every nightly.
       commitMessageTopic: 'Rust toolchain',
       matchManagers: [
         'rust-toolchain',
@@ -54,7 +57,7 @@
         'toolchain',
       ],
       schedule: [
-        '* * * * *',
+        'before 5am on Monday',
       ],
       minimumReleaseAge: null,
       automerge: true,
