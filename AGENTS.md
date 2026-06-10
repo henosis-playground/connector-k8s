@@ -38,8 +38,3 @@ If a `.jj/` directory exists, the project uses [jj](https://martinvonz.github.io
   with `.workspace = true`
 - Use narrow `LINT.IfChange` / `LINT.ThenChange` directives when duplicated
   cross-file content must stay in sync and cannot be eliminated.
-
-## Claude Code
-
-The `/plugin-dev` skill is available for creating project-specific Claude Code
-commands, agents, and skills.
