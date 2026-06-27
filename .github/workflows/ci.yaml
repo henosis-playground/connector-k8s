@@ -156,23 +156,26 @@ jobs:
         # https://github.com/Swatinem/rust-cache/issues/204 (stale metadata).
         # Forcing the cargo-install fallback builds from source; slower on a
         # cold cache but correct, and rust-cache handles the target artifacts.
+        #
+        # Public repos get code scanning automatically. Private repos can set
+        # ENABLE_CODE_SCANNING=true when GitHub code scanning is enabled.
         uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
         with:
           tool: clippy-sarif,sarif-fmt
           fallback: cargo-install
-        if: github.event.repository.visibility == 'public'
+        if: github.event.repository.visibility == 'public' || vars.ENABLE_CODE_SCANNING == 'true'
       - name: Check (SARIF)
         run: >
           cargo clippy --workspace --all-features --all-targets --message-format=json | clippy-sarif | tee clippy-results.sarif | sarif-fmt
 
         continue-on-error: true
-        if: github.event.repository.visibility == 'public'
+        if: github.event.repository.visibility == 'public' || vars.ENABLE_CODE_SCANNING == 'true'
       - name: Upload
         uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           sarif_file: clippy-results.sarif
           wait-for-processing: true
-        if: github.event.repository.visibility == 'public'
+        if: github.event.repository.visibility == 'public' || vars.ENABLE_CODE_SCANNING == 'true'
       - name: Check
         run: cargo clippy --workspace --all-features --all-targets --keep-going -- -D warnings --allow deprecated
   coverage:

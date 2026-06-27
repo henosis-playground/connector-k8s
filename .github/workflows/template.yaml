@@ -14,7 +14,7 @@ concurrency:
 jobs:
   update:
     name: Update
-    environment: template-update
+    if: github.repository != 'skuld-systems/_rust'
     permissions:
       pull-requests: write
       contents: write
@@ -31,7 +31,6 @@ jobs:
           repository: ${{ env.TEMPLATE_REPO }}
           ref: ${{ env.TEMPLATE_BRANCH }}
           path: .template
-          token: ${{ secrets.TEMPLATE_TOKEN }}
           fetch-depth: 0
           persist-credentials: false
       - name: Configure git
@@ -49,12 +48,8 @@ jobs:
       - name: Clear any existing branch
         run: "git push origin --delete template-update"
         continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
       - name: Push branch
         run: "git push --set-upstream origin template-update"
-        env:
-          GH_TOKEN: ${{ github.token }}
       - name: Create PR
         run: "gh pr create --head template-update --title 'chore: Update from template' --body ''"
         env:

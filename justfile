@@ -29,7 +29,7 @@ check-pre-commit:
 lint: check-fmt clippy check-deny check-pre-commit
 
 test *flags:
-    cargo nextest run --cargo-profile testing {{ flags }}
+    cargo nextest run --cargo-profile testing --no-tests=pass {{ flags }}
 
 doc *flags:
     RUSTDOCFLAGS="--cfg docsrs" cargo doc --all-features --no-deps --document-private-items --keep-going {{ flags }}
