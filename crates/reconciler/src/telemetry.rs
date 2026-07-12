@@ -12,3 +12,7 @@ pub const COMPONENT_COUNT: &str = "soter.henosis.slice.component_count";
 pub const RECONCILE_OUTCOME: &str = "soter.henosis.reconcile.outcome";
 /// Commit published to the desired-state branch.
 pub const PUBLISHED_COMMIT: &str = "soter.henosis.publication.commit";
+/// Bounded environment publication policy.
+pub const PUBLICATION_POLICY: &str = "soter.henosis.publication.policy";
+/// GitHub pull-request number rendered as a string ID.
+pub const PROPOSAL_NUMBER: &str = "soter.henosis.proposal.number";

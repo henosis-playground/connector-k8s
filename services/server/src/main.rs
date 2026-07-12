@@ -9,6 +9,7 @@ use connectrpc::Server;
 use henosis_k8s_reconciler::ConnectorHandler;
 use henosis_k8s_reconciler::engine::Engine;
 use henosis_k8s_reconciler::engine::EngineConfig;
+use henosis_k8s_reconciler::engine::PublicationPolicies;
 use henosis_k8s_reconciler::reconciler::CoreReporter;
 use henosis_k8s_reconciler::reconciler::Reconciler;
 use henosis_k8s_reconciler::reconciler::ReconcilerConfig;
@@ -46,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ),
         github_token_file: path_env("HENOSIS_GITHUB_TOKEN_FILE", "/run/secrets/github-pat"),
         scratch_root: state_dir.join("scratch"),
+        publication_policies: publication_policies()?,
     })?;
     let core_uri = string_env("HENOSIS_CORE_URL", "http://core:8080").parse::<Uri>()?;
     let reporter = Arc::new(CoreReporter::new(core_uri));
@@ -73,4 +75,11 @@ fn string_env(name: &str, default: &str) -> String {
 
 fn path_env(name: &str, default: &str) -> PathBuf {
     PathBuf::from(string_env(name, default))
+}
+
+fn publication_policies() -> Result<PublicationPolicies, serde_json::Error> {
+    serde_json::from_str(&string_env(
+        "HENOSIS_PUBLICATION_POLICIES",
+        r#"{"default":"direct","environments":{}}"#,
+    ))
 }

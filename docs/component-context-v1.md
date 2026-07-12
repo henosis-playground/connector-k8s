@@ -61,10 +61,12 @@ connector's durable accepted level provides the same identity after a process re
 
 ## Publication and outputs
 
-The environment is published only to `env/<environment.id>` in the configured deploy repository.
-Rendering completes in a temporary directory, its `manifest.json` component set is compared with the
-complete desired slice, and only then is one Git tree pushed with a force-with-lease. A failed render
-or validation never changes the branch.
+The applied environment exists only at `env/<environment.id>` in the configured deploy repository.
+Rendering completes in a temporary directory and its `manifest.json` component set is compared with
+the complete desired slice before publication. The connector's per-environment policy then either
+pushes that complete tree directly with force-with-lease or proposes it through the PR-gated flow in
+[review-projection-v1.md](review-projection-v1.md). A failed render or validation never changes the
+applied tree.
 
 Each renderer `manifest.json` component `outputs` object is serialized as deterministic JSON and
 reported as that component's complete `ComponentOutputs.values_json`. The connector reports every

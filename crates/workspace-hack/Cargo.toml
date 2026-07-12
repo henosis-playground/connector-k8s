@@ -11,6 +11,21 @@ description = "workspace-hack package, managed by hakari"
 [dependencies]
 tracing-core = { version = "0.1" }
 
+[target.x86_64-unknown-linux-gnu.dependencies]
+log = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.x86_64-unknown-linux-musl.dependencies]
+log = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.aarch64-unknown-linux-gnu.dependencies]
+log = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.aarch64-unknown-linux-musl.dependencies]
+log = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.aarch64-apple-darwin.dependencies]
+log = { version = "0.4", default-features = false, features = ["std"] }
+
 ### END HAKARI SECTION
 
 [lints]

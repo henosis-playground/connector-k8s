@@ -17,6 +17,7 @@ use henosis_proto::proto::henosis::v1::RetireSliceResponse;
 pub mod context;
 pub mod engine;
 pub mod reconciler;
+pub mod review;
 pub mod slice;
 pub mod telemetry;
 

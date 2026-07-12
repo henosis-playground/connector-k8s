@@ -34,6 +34,10 @@ use uuid::Uuid;
 
 use crate::engine::Engine;
 use crate::engine::EngineError;
+use crate::engine::Proposal;
+use crate::engine::ProposalPublication;
+use crate::engine::ProposalStatus;
+use crate::engine::PublicationPolicy;
 use crate::slice::DesiredSlice;
 use crate::slice::SliceError;
 
@@ -130,6 +134,8 @@ struct GraphState {
     #[serde(default)]
     published: Option<PublishedState>,
     #[serde(default)]
+    proposal: Option<PendingProposalState>,
+    #[serde(default)]
     retired: bool,
 }
 
@@ -140,6 +146,15 @@ struct PublishedState {
     report: SliceReport,
     #[serde(default)]
     commit: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingProposalState {
+    generation: u64,
+    request_id: Vec<u8>,
+    report: SliceReport,
+    outputs: Vec<henosis_proto::proto::henosis::v1::ComponentOutputs>,
+    proposal: Proposal,
 }
 
 impl Reconciler {
@@ -189,6 +204,7 @@ impl Reconciler {
                         environment: desired.environment,
                         desired: request,
                         published: state.published,
+                        proposal: state.proposal,
                         retired: false,
                     },
                 )?;
@@ -200,6 +216,7 @@ impl Reconciler {
                     environment: desired.environment,
                     desired: request,
                     published: None,
+                    proposal: None,
                     retired: false,
                 },
             )?;
@@ -268,9 +285,13 @@ impl Reconciler {
         if state.retired {
             return Ok(retained_generation);
         }
+        if let Some(proposal) = &state.proposal {
+            self.engine.cancel_proposal(&proposal.proposal).await?;
+        }
         self.engine.remove(&state.environment).await?;
         state.retired = true;
         state.published = None;
+        state.proposal = None;
         self.save(graph_id, &state)?;
         Ok(retained_generation)
     }
@@ -289,6 +310,7 @@ impl Reconciler {
             return Ok(());
         }
         let desired = DesiredSlice::from_request(&state.desired, Some(&state.environment))?;
+        let policy = self.engine.publication_policy(&desired.environment);
         let graph = hex::encode(graph_id);
         let generation = desired.generation.to_string();
         let span = tracing::span!(
@@ -298,19 +320,82 @@ impl Reconciler {
             soter.henosis.graph.generation = %generation,
             soter.henosis.environment.id = %desired.environment,
             soter.henosis.slice.component_count = desired.components.len(),
+            soter.henosis.publication.policy = publication_policy_name(policy),
             soter.henosis.reconcile.outcome = tracing::field::Empty,
             soter.henosis.publication.commit = tracing::field::Empty,
+            soter.henosis.proposal.number = tracing::field::Empty,
         );
         async {
             if let Some(published) = &state.published
                 && published.generation == desired.generation
             {
-                self.report_final(published).await?;
+                self.report_snapshot(&published.request_id, &published.report)
+                    .await?;
                 Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "already_published");
                 if let Some(commit) = &published.commit {
                     Span::current().record(crate::telemetry::PUBLISHED_COMMIT, commit);
                 }
                 return Ok(());
+            }
+
+            if policy == PublicationPolicy::PrGated
+                && let Some(pending) = &state.proposal
+                && pending.generation == desired.generation
+            {
+                Span::current().record(
+                    crate::telemetry::PROPOSAL_NUMBER,
+                    pending.proposal.number.to_string(),
+                );
+                match self.engine.proposal_status(&pending.proposal).await? {
+                    ProposalStatus::Open => {
+                        self.schedule_reconcile(graph_id, desired.generation);
+                        self.report_snapshot(&pending.request_id, &pending.report)
+                            .await?;
+                        Span::current()
+                            .record(crate::telemetry::RECONCILE_OUTCOME, "awaiting_review");
+                        return Ok(());
+                    }
+                    ProposalStatus::Merged(commit) => {
+                        let report = report_for(
+                            &desired,
+                            ComponentDispositionKind::Ready,
+                            pending.outputs.clone(),
+                            Vec::new(),
+                        );
+                        let published = PublishedState {
+                            generation: desired.generation,
+                            request_id: stable_report_id(&report),
+                            report,
+                            commit: Some(commit.clone()),
+                        };
+                        state.published = Some(published.clone());
+                        let proposal = state.proposal.take().expect("proposal was inspected");
+                        self.save(graph_id, &state)?;
+                        self.report_snapshot(&published.request_id, &published.report)
+                            .await?;
+                        let _ = self.engine.remove_proposal_branch(&proposal.proposal).await;
+                        Span::current()
+                            .record(crate::telemetry::RECONCILE_OUTCOME, "proposal_merged");
+                        Span::current().record(crate::telemetry::PUBLISHED_COMMIT, commit);
+                        return Ok(());
+                    }
+                    ProposalStatus::Closed => {
+                        let report = report_for(
+                            &desired,
+                            ComponentDispositionKind::Failed,
+                            Vec::new(),
+                            vec![diagnostic(
+                                "k8s.review.closed",
+                                "the publication proposal was closed without merging",
+                                DiagnosticSeverity::Error,
+                            )],
+                        );
+                        let _ = self.reporter.report(report_request(report, false)).await;
+                        Span::current()
+                            .record(crate::telemetry::RECONCILE_OUTCOME, "proposal_closed");
+                        return Ok(());
+                    }
+                }
             }
 
             let reconciling = report_for(
@@ -324,18 +409,80 @@ impl Reconciler {
                 .report(report_request(reconciling, false))
                 .await;
 
+            if let Some(pending) = state.proposal.take()
+                && (desired.components.is_empty() || policy == PublicationPolicy::Direct)
+            {
+                if let Err(error) = self.engine.cancel_proposal(&pending.proposal).await {
+                    self.report_failure(&desired, &error).await;
+                    Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "failed");
+                    return Err(error.into());
+                }
+                self.save(graph_id, &state)?;
+            }
+
+            if desired.components.is_empty()
+                && policy == PublicationPolicy::PrGated
+                && state.published.is_some()
+            {
+                let report = report_for(
+                    &desired,
+                    ComponentDispositionKind::Failed,
+                    Vec::new(),
+                    vec![diagnostic(
+                        "k8s.review.branch-deletion-unsupported",
+                        "GitHub pull requests cannot propose deleting their base branch",
+                        DiagnosticSeverity::Error,
+                    )],
+                );
+                let _ = self.reporter.report(report_request(report, false)).await;
+                Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "failed");
+                return Ok(());
+            }
+
             let result = if desired.components.is_empty() {
-                self.engine
-                    .remove(&desired.environment)
-                    .await
-                    .map(|()| (Vec::new(), None))
+                if policy == PublicationPolicy::Direct {
+                    self.engine
+                        .remove(&desired.environment)
+                        .await
+                        .map(|()| (Vec::new(), None))
+                } else {
+                    Ok((Vec::new(), None))
+                }
             } else {
                 match self.engine.render(&desired).await {
-                    Ok(world) => self
+                    Ok(world) if policy == PublicationPolicy::Direct => self
                         .engine
                         .publish(&desired, &world)
                         .await
                         .map(|commit| (world.outputs, Some(commit))),
+                    Ok(world) => match self.engine.propose(&desired, &world).await {
+                        Ok(ProposalPublication::Unchanged(commit)) => {
+                            Ok((world.outputs, Some(commit)))
+                        }
+                        Ok(ProposalPublication::Awaiting(proposal)) => {
+                            let report = awaiting_review_report(&desired, &proposal.url);
+                            let pending = PendingProposalState {
+                                generation: desired.generation,
+                                request_id: stable_report_id(&report),
+                                report,
+                                outputs: world.outputs,
+                                proposal,
+                            };
+                            Span::current().record(
+                                crate::telemetry::PROPOSAL_NUMBER,
+                                pending.proposal.number.to_string(),
+                            );
+                            state.proposal = Some(pending.clone());
+                            self.save(graph_id, &state)?;
+                            self.schedule_reconcile(graph_id, desired.generation);
+                            self.report_snapshot(&pending.request_id, &pending.report)
+                                .await?;
+                            Span::current()
+                                .record(crate::telemetry::RECONCILE_OUTCOME, "awaiting_review");
+                            return Ok(());
+                        }
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 }
             };
@@ -347,6 +494,7 @@ impl Reconciler {
                     return Err(error.into());
                 }
             };
+            state.proposal = None;
             let report = report_for(
                 &desired,
                 ComponentDispositionKind::Ready,
@@ -362,7 +510,8 @@ impl Reconciler {
             };
             state.published = Some(published.clone());
             self.save(graph_id, &state)?;
-            self.report_final(&published).await?;
+            self.report_snapshot(&published.request_id, &published.report)
+                .await?;
             Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "published");
             if let Some(commit) = commit {
                 Span::current().record(crate::telemetry::PUBLISHED_COMMIT, commit);
@@ -383,10 +532,14 @@ impl Reconciler {
         let _ = self.reporter.report(report_request(report, false)).await;
     }
 
-    async fn report_final(&self, published: &PublishedState) -> Result<(), ReportError> {
+    async fn report_snapshot(
+        &self,
+        request_id: &[u8],
+        report: &SliceReport,
+    ) -> Result<(), ReportError> {
         let request = ReportSliceRequest {
-            request_id: Some(published.request_id.clone()),
-            report: buffa::MessageField::some(published.report.clone()),
+            request_id: Some(request_id.to_vec()),
+            report: buffa::MessageField::some(report.clone()),
             ..Default::default()
         };
         let mut last = None;
@@ -400,6 +553,14 @@ impl Reconciler {
             }
         }
         Err(last.unwrap_or_else(|| ReportError("report retry loop did not run".into())))
+    }
+
+    fn schedule_reconcile(self: &Arc<Self>, graph_id: [u8; 16], generation: u64) {
+        let reconciler = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let _ = reconciler.reconcile_once(graph_id, generation).await;
+        });
     }
 
     async fn graph_lock(&self, graph_id: [u8; 16]) -> Arc<Mutex<()>> {
@@ -473,6 +634,33 @@ fn report_for(
         outputs,
         diagnostics,
         ..Default::default()
+    }
+}
+
+fn awaiting_review_report(desired: &DesiredSlice, url: &str) -> SliceReport {
+    report_for(
+        desired,
+        ComponentDispositionKind::Reconciling,
+        Vec::new(),
+        vec![diagnostic(
+            "k8s.awaiting-review",
+            url,
+            DiagnosticSeverity::Info,
+        )],
+    )
+}
+
+fn diagnostic(code: &str, message: &str, severity: DiagnosticSeverity) -> Diagnostic {
+    Diagnostic::default()
+        .with_code(code)
+        .with_message(message)
+        .with_severity(severity)
+}
+
+const fn publication_policy_name(policy: PublicationPolicy) -> &'static str {
+    match policy {
+        PublicationPolicy::Direct => "direct",
+        PublicationPolicy::PrGated => "pr-gated",
     }
 }
 

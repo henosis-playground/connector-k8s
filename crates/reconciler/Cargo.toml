@@ -14,6 +14,7 @@ faultline.workspace = true
 henosis-proto.workspace = true
 hex.workspace = true
 http.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

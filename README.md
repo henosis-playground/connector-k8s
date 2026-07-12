@@ -12,6 +12,10 @@ The connector-owned bytes that authoring and collector integrations place in
 The format is strict and versioned; it carries the environment identity, source repository and
 immutable revision, and image digest needed by the current renderer.
 
+Per-environment direct and pull-request-gated publication, including the reusable human/machine
+review projection, are specified in
+[docs/review-projection-v1.md](docs/review-projection-v1.md).
+
 ## Service configuration
 
 | Variable | Default | Purpose |
@@ -25,6 +29,7 @@ immutable revision, and image digest needed by the current renderer.
 | `HENOSIS_RUNNER_CACHE_DIR` | `/var/lib/henosis-connector-k8s/runner-cache` | Recipe-managed SHA cache |
 | `HENOSIS_DEPLOY_REMOTE` | `https://github.com/henosis-playground/deploy.git` | Desired-state repository; other GitHub orgs are rejected |
 | `HENOSIS_GITHUB_TOKEN_FILE` | `/run/secrets/github-pat` | PAT file read by Git askpass |
+| `HENOSIS_PUBLICATION_POLICIES` | `{"default":"direct","environments":{}}` | Strict JSON default and per-environment `direct`/`pr-gated` policies |
 
 ## Layout
 

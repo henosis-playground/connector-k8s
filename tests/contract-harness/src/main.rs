@@ -38,8 +38,6 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-const ENVIRONMENT: &str = "preview_3jhc7x633z88188fzqhcbbrf84";
-
 struct Callback {
     reports: mpsc::UnboundedSender<ReportSliceRequest>,
 }
@@ -79,7 +77,9 @@ impl ConnectorCallbackService for Callback {
 #[serde(rename_all = "camelCase")]
 struct Evidence {
     accepted_generation: u64,
-    environment: &'static str,
+    environment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_report: Option<ReportSliceRequest>,
     report: ReportSliceRequest,
 }
 
@@ -92,6 +92,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let evidence_path = PathBuf::from(
         env::var("HENOSIS_EVIDENCE_PATH").unwrap_or_else(|_| "/evidence/report.json".into()),
     );
+    let environment = env::var("HENOSIS_ENVIRONMENT")
+        .unwrap_or_else(|_| "preview_3jhc7x633z88188fzqhcbbrf84".into());
+    let expect_cycle = env::var("HENOSIS_EXPECT_REPORT").as_deref() == Ok("review-cycle");
 
     let (report_tx, mut report_rx) = mpsc::unbounded_channel();
     let callback = Arc::new(Callback { reports: report_tx });
@@ -108,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let client =
         ConnectorServiceClient::new(HttpClient::plaintext(), ClientConfig::new(connector_uri));
-    let request = live_request()?;
+    let request = live_request(&environment)?;
     let accepted_generation = loop {
         match client.reconcile_slice(request.clone()).await {
             Ok(response) => {
@@ -121,9 +124,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    let final_report = tokio::time::timeout(Duration::from_secs(1_200), async {
+    let (pending_report, final_report) = tokio::time::timeout(Duration::from_secs(1_200), async {
+        let mut pending = None;
         while let Some(request) = report_rx.recv().await {
             let report = request.report.as_option()?;
+            let awaiting_review = report.dispositions.iter().all(|disposition| {
+                disposition.kind.as_ref().is_some_and(|kind| {
+                    kind.to_i32() == ComponentDispositionKind::Reconciling as i32
+                })
+            }) && report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("k8s.awaiting-review"));
+            if awaiting_review {
+                pending = Some(request.clone());
+                if !expect_cycle {
+                    return Some((pending, request));
+                }
+                continue;
+            }
             let ready = report.dispositions.iter().all(|disposition| {
                 disposition
                     .kind
@@ -131,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .is_some_and(|kind| kind.to_i32() == ComponentDispositionKind::Ready as i32)
             });
             if ready && report.outputs.len() == 2 && report.diagnostics.is_empty() {
-                return Some(request);
+                return Some((pending, request));
             }
         }
         None
@@ -146,7 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         evidence_path,
         serde_json::to_vec_pretty(&Evidence {
             accepted_generation,
-            environment: ENVIRONMENT,
+            environment,
+            pending_report,
             report: final_report,
         })?,
     )?;
@@ -155,7 +175,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn live_request() -> Result<ReconcileSliceRequest, serde_json::Error> {
+fn live_request(environment: &str) -> Result<ReconcileSliceRequest, serde_json::Error> {
+    let graph_byte = env::var("HENOSIS_GRAPH_BYTE")
+        .ok()
+        .and_then(|value| u8::from_str_radix(&value, 16).ok())
+        .unwrap_or(0x72);
     let components = vec![
         component(
             [0x11; 16],
@@ -163,6 +187,7 @@ fn live_request() -> Result<ReconcileSliceRequest, serde_json::Error> {
             "henosis-playground/service-a",
             "ca73c9ae5b6579ad0b6b77b80fb77b54fc5fd595",
             "sha256:b808fd4ef39b8f18309b6e266f7ab84d466ee8713c20f832248ae35cc5b64586",
+            environment,
         )?,
         component(
             [0x22; 16],
@@ -170,12 +195,18 @@ fn live_request() -> Result<ReconcileSliceRequest, serde_json::Error> {
             "henosis-playground/service-b",
             "4ab590bd33410df836baa7fe3a08d3999b2d2a8a",
             "sha256:f0744d67c15d0c74d6c79444a394455b458a59c4b25ea4e037ad4cdf22f377d1",
+            environment,
         )?,
     ];
     Ok(ReconcileSliceRequest {
         slice: MessageField::some(GraphSlice {
-            graph_id: Some(vec![0x72; 16]),
-            generation: Some(1),
+            graph_id: Some(vec![graph_byte; 16]),
+            generation: Some(
+                env::var("HENOSIS_GENERATION")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(1),
+            ),
             connector: Some(CONNECTOR_NAME.into()),
             components,
             ..Default::default()
@@ -190,11 +221,12 @@ fn component(
     repository: &str,
     revision: &str,
     digest: &str,
+    environment: &str,
 ) -> Result<Component, serde_json::Error> {
     let context = ComponentContext {
         api_version: API_VERSION.into(),
         environment: EnvironmentContext {
-            id: ENVIRONMENT.into(),
+            id: environment.into(),
         },
         source: SourceContext {
             repository: repository.into(),
