@@ -1,6 +1,9 @@
-# {{PROJECT}}
+# connector-k8s
 
-{{DESCRIPTION}}
+The Henosis Kubernetes reconciler.
+
+This workspace is intentionally limited to the reconciler library and its service process while
+the core ConnectRPC API remains under review.
 
 ## Layout
 

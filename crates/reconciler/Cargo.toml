@@ -1,0 +1,16 @@
+[package]
+name = "henosis-k8s-reconciler"
+version = "0.0.0"
+description = "Kubernetes reconciliation logic for Henosis graph slices"
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+connectrpc.workspace = true
+faultline.workspace = true
+workspace-hack = { version = "0.0.0", path = "../workspace-hack" }
+
+[lints]
+workspace = true

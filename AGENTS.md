@@ -1,6 +1,6 @@
-# {{PROJECT}}
+# connector-k8s
 
-{{DESCRIPTION}}
+The Henosis Kubernetes reconciler.
 
 ## Layout
 

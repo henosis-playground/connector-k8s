@@ -52,5 +52,5 @@ changelog:
     git cliff -o CHANGELOG.md
 
 hakari:
-    cargo hakari manage-deps
+    cargo hakari manage-deps --yes
     cargo hakari generate

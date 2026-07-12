@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tests/*"]
+members = ["crates/*", "services/*"]
 
 [workspace.package]
-repository = "{{REPOSITORY}}"
+repository = "https://github.com/henosis-playground/connector-k8s"
 edition = "2024"
 # LINT.IfChange(msrv)
 rust-version = "1.96.0"
@@ -16,7 +16,10 @@ rust-version = "1.96.0"
 publish = false
 
 [workspace.dependencies]
-automod = "1.0.14"
+connectrpc = { version = "0.8.1", features = ["client"] }
+faultline = "0.1.0"
+
+henosis-k8s-reconciler = { path = "crates/reconciler" }
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

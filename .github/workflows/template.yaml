@@ -6,7 +6,7 @@ on:
     - cron: '1 1 1 * *'
   workflow_dispatch:
 env:
-  TEMPLATE_REPO: "skuld-systems/_rust"
+  TEMPLATE_REPO: "MikeIvanichev/_rust"
   TEMPLATE_BRANCH: "main"
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   update:
     name: Update
-    if: github.repository != 'skuld-systems/_rust'
+    if: github.repository != 'MikeIvanichev/_rust'
     permissions:
       pull-requests: write
       contents: write
