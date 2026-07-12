@@ -4,6 +4,8 @@
 pub const GRAPH_ID: &str = "soter.henosis.graph.id";
 /// Desired graph generation rendered as a string ID.
 pub const GRAPH_GENERATION: &str = "soter.henosis.graph.generation";
+/// Durable graph-slice sequence rendered as a string ID.
+pub const SLICE_SEQUENCE: &str = "soter.henosis.slice.sequence";
 /// Connector-owned environment identity.
 pub const ENVIRONMENT_ID: &str = "soter.henosis.environment.id";
 /// Number of components in the complete owned slice.

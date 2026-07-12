@@ -45,13 +45,13 @@ impl ConnectorService for ConnectorHandler {
         _ctx: RequestContext,
         request: ServiceRequest<'_, ReconcileSliceRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<ReconcileSliceResponse> + Send + use<'a>> {
-        let generation = self
+        let sequence = self
             .reconciler
-            .accept(request.to_owned_message())
+            .accept(&request)
             .await
             .map_err(connect_error)?;
         Ok(ReconcileSliceResponse::default()
-            .with_accepted_generation(generation)
+            .with_accepted_sequence(sequence)
             .into())
     }
 
@@ -60,19 +60,17 @@ impl ConnectorService for ConnectorHandler {
         _ctx: RequestContext,
         request: ServiceRequest<'_, RetireSliceRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<RetireSliceResponse> + Send + use<'a>> {
-        let request = request.to_owned_message();
         let slice = request
             .slice
             .as_option()
             .ok_or_else(|| ConnectError::invalid_argument("slice is required"))?;
-        if slice.connector.as_deref() != Some(CONNECTOR_NAME) {
+        if slice.connector != Some(CONNECTOR_NAME) {
             return Err(ConnectError::invalid_argument(format!(
                 "slice.connector must be {CONNECTOR_NAME:?}"
             )));
         }
         let graph_id: [u8; 16] = slice
             .graph_id
-            .as_deref()
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| {
                 ConnectError::invalid_argument("slice.graph_id must contain exactly 16 bytes")
@@ -83,9 +81,12 @@ impl ConnectorService for ConnectorHandler {
             .ok_or_else(|| {
                 ConnectError::invalid_argument("slice.generation must be greater than zero")
             })?;
+        let sequence = slice
+            .sequence
+            .ok_or_else(|| ConnectError::invalid_argument("slice.sequence is required"))?;
         let retired = self
             .reconciler
-            .retire(graph_id, generation)
+            .retire(graph_id, generation, sequence)
             .await
             .map_err(connect_error)?;
         Ok(RetireSliceResponse::default()
@@ -97,7 +98,7 @@ impl ConnectorService for ConnectorHandler {
 fn connect_error(error: ReconcileError) -> ConnectError {
     let code = match &error {
         ReconcileError::Invalid(_) => ErrorCode::InvalidArgument,
-        ReconcileError::Retired | ReconcileError::GenerationConflict(_) => {
+        ReconcileError::Retired | ReconcileError::SequenceConflict(_) => {
             ErrorCode::FailedPrecondition
         }
         ReconcileError::Report(_) => ErrorCode::Unavailable,

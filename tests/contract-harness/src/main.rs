@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use buffa::Message as _;
 use buffa::MessageField;
 use connectrpc::ConnectError;
 use connectrpc::ErrorCode;
@@ -24,13 +25,13 @@ use henosis_k8s_reconciler::context::ImageContext;
 use henosis_k8s_reconciler::context::SourceContext;
 use henosis_proto::connect::henosis::v1::ConnectorCallbackService;
 use henosis_proto::connect::henosis::v1::ConnectorServiceClient;
-use henosis_proto::proto::henosis::v1::Component;
 use henosis_proto::proto::henosis::v1::ComponentDispositionKind;
-use henosis_proto::proto::henosis::v1::ComponentRevision;
+use henosis_proto::proto::henosis::v1::ComponentSpec;
 use henosis_proto::proto::henosis::v1::FetchSliceRequest;
 use henosis_proto::proto::henosis::v1::FetchSliceResponse;
 use henosis_proto::proto::henosis::v1::GraphSlice;
 use henosis_proto::proto::henosis::v1::ReconcileSliceRequest;
+use henosis_proto::proto::henosis::v1::RegisteredComponentSpec;
 use henosis_proto::proto::henosis::v1::ReportSliceRequest;
 use henosis_proto::proto::henosis::v1::ReportSliceResponse;
 use http::Uri;
@@ -40,6 +41,7 @@ use tokio::sync::oneshot;
 
 struct Callback {
     reports: mpsc::UnboundedSender<ReportSliceRequest>,
+    slice: GraphSlice,
 }
 
 impl ConnectorCallbackService for Callback {
@@ -50,6 +52,12 @@ impl ConnectorCallbackService for Callback {
     ) -> ServiceResult<impl connectrpc::Encodable<ReportSliceResponse> + Send + use<'a>> {
         let request = request.to_owned_message();
         let publishable = !request.report.outputs.is_empty();
+        if publishable != request.publication_id.is_some() {
+            return Err(ConnectError::new(
+                ErrorCode::InvalidArgument,
+                "publication_id presence does not match report outputs",
+            ));
+        }
         self.reports.send(request).map_err(|_| {
             ConnectError::new(ErrorCode::Internal, "live-proof report receiver closed")
         })?;
@@ -64,19 +72,29 @@ impl ConnectorCallbackService for Callback {
     async fn fetch_slice<'a>(
         &'a self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, FetchSliceRequest>,
+        request: ServiceRequest<'_, FetchSliceRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<FetchSliceResponse> + Send + use<'a>> {
-        Err::<connectrpc::Response<FetchSliceResponse>, ConnectError>(ConnectError::new(
-            ErrorCode::Unimplemented,
-            "the live-proof harness does not exercise recovery fetch",
-        ))
+        if request.graph_id != self.slice.graph_id.as_deref()
+            || request.connector != Some(CONNECTOR_NAME)
+            || request.sequence != self.slice.sequence
+        {
+            return Err(ConnectError::new(
+                ErrorCode::NotFound,
+                "the requested exact slice is not retained",
+            ));
+        }
+        Ok(FetchSliceResponse {
+            slice: MessageField::some(self.slice.clone()),
+            ..Default::default()
+        }
+        .into())
     }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Evidence {
-    accepted_generation: u64,
+    accepted_sequence: u64,
     environment: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pending_report: Option<ReportSliceRequest>,
@@ -96,8 +114,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or_else(|_| "preview_3jhc7x633z88188fzqhcbbrf84".into());
     let expect_cycle = env::var("HENOSIS_EXPECT_REPORT").as_deref() == Ok("review-cycle");
 
+    let request = live_request(&environment)?;
+    let slice = request
+        .slice
+        .as_option()
+        .ok_or("live request omitted its slice")?
+        .clone();
     let (report_tx, mut report_rx) = mpsc::unbounded_channel();
-    let callback = Arc::new(Callback { reports: report_tx });
+    let callback = Arc::new(Callback {
+        reports: report_tx,
+        slice,
+    });
     let router = Router::new().add_service(callback);
     let server = Server::bind(callback_bind).await?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -111,14 +138,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let client =
         ConnectorServiceClient::new(HttpClient::plaintext(), ClientConfig::new(connector_uri));
-    let request = live_request(&environment)?;
-    let accepted_generation = loop {
+    let accepted_sequence = loop {
         match client.reconcile_slice(request.clone()).await {
             Ok(response) => {
                 break response
                     .view()
-                    .accepted_generation
-                    .ok_or("connector omitted accepted_generation")?;
+                    .accepted_sequence
+                    .ok_or("connector omitted accepted_sequence")?;
             }
             Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
         }
@@ -164,7 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     fs::write(
         evidence_path,
         serde_json::to_vec_pretty(&Evidence {
-            accepted_generation,
+            accepted_sequence,
             environment,
             pending_report,
             report: final_report,
@@ -182,7 +208,6 @@ fn live_request(environment: &str) -> Result<ReconcileSliceRequest, serde_json::
         .unwrap_or(0x72);
     let components = vec![
         component(
-            [0x11; 16],
             "service-a",
             "henosis-playground/service-a",
             "ca73c9ae5b6579ad0b6b77b80fb77b54fc5fd595",
@@ -190,7 +215,6 @@ fn live_request(environment: &str) -> Result<ReconcileSliceRequest, serde_json::
             environment,
         )?,
         component(
-            [0x22; 16],
             "service-b",
             "henosis-playground/service-b",
             "4ab590bd33410df836baa7fe3a08d3999b2d2a8a",
@@ -209,6 +233,12 @@ fn live_request(environment: &str) -> Result<ReconcileSliceRequest, serde_json::
             ),
             connector: Some(CONNECTOR_NAME.into()),
             components,
+            sequence: Some(
+                env::var("HENOSIS_SEQUENCE")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            ),
             ..Default::default()
         }),
         ..Default::default()
@@ -216,13 +246,12 @@ fn live_request(environment: &str) -> Result<ReconcileSliceRequest, serde_json::
 }
 
 fn component(
-    id: [u8; 16],
     name: &str,
     repository: &str,
     revision: &str,
     digest: &str,
     environment: &str,
-) -> Result<Component, serde_json::Error> {
+) -> Result<RegisteredComponentSpec, serde_json::Error> {
     let context = ComponentContext {
         api_version: API_VERSION.into(),
         environment: EnvironmentContext {
@@ -236,16 +265,16 @@ fn component(
             digest: digest.into(),
         },
     };
-    Ok(Component {
-        id: Some(id.to_vec()),
+    let spec = ComponentSpec {
         name: Some(name.into()),
-        revision: MessageField::some(ComponentRevision {
-            source: Some(repository.into()),
-            revision: Some(revision.into()),
-            ..Default::default()
-        }),
         connector: Some(CONNECTOR_NAME.into()),
-        context: Some(serde_json::to_vec(&context)?),
+        connector_context: Some(serde_json::to_vec(&context)?),
+        ..Default::default()
+    };
+    let hash = blake3::hash(&spec.encode_to_vec()).as_bytes().to_vec();
+    Ok(RegisteredComponentSpec {
+        hash: Some(hash),
+        spec: MessageField::some(spec),
         ..Default::default()
     })
 }

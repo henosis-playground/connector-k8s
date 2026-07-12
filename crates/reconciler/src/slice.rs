@@ -3,9 +3,18 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use henosis_proto::proto::henosis::v1::Component;
-use henosis_proto::proto::henosis::v1::ReconcileSliceRequest;
+use buffa::Message as _;
+use buffa::MessageView as _;
+use henosis_proto::proto::henosis::v1::GraphSlice;
+use henosis_proto::proto::henosis::v1::ReconcileSliceRequestView;
+use henosis_proto::proto::henosis::v1::RegisteredComponentSpecView;
+use iddqd::IdOrdItem;
+use iddqd::IdOrdMap;
+use iddqd::id_upcast;
+use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest as _;
+use sha2::Sha256;
 use thiserror::Error;
 
 use crate::context::ComponentContext;
@@ -13,25 +22,61 @@ use crate::context::ContextError;
 use crate::context::validate_dns_label;
 
 /// Validated desired slice used by rendering and publication.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredSlice {
     /// Raw graph UUID bytes.
     pub graph_id: [u8; 16],
-    /// Per-graph desired generation.
+    /// Per-graph desired generation provenance.
     pub generation: u64,
+    /// Durable materialization identity.
+    pub sequence: u64,
     /// Immutable environment identity and deploy branch suffix.
     pub environment: String,
-    /// Components sorted by manifest name.
-    pub components: BTreeMap<String, ComponentPin>,
+    /// Registered component specs keyed and sorted by their content hash.
+    pub components: IdOrdMap<ComponentPin>,
+    /// Current-generation upstream publications keyed by their component spec
+    /// hash.
+    pub upstream_outputs: IdOrdMap<UpstreamOutput>,
 }
 
-/// One validated component pin.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One validated registered component pin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComponentPin {
-    /// Raw component UUID bytes.
-    pub id: [u8; 16],
+    /// Registered component-spec content hash.
+    pub spec_hash: [u8; 32],
+    /// Platform manifest component key.
+    pub name: String,
     /// Connector-owned context.
     pub context: ComponentContext,
+}
+
+impl IdOrdItem for ComponentPin {
+    type Key<'a> = [u8; 32];
+
+    id_upcast!();
+
+    fn key(&self) -> Self::Key<'_> {
+        self.spec_hash
+    }
+}
+
+/// One validated current-generation upstream output level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamOutput {
+    /// Component-spec identity that produced the output.
+    pub component_spec_hash: [u8; 32],
+    /// Canonical JSON output object.
+    pub values_json: Vec<u8>,
+}
+
+impl IdOrdItem for UpstreamOutput {
+    type Key<'a> = [u8; 32];
+
+    id_upcast!();
+
+    fn key(&self) -> Self::Key<'_> {
+        self.component_spec_hash
+    }
 }
 
 /// Strict TOML shape consumed by `henosis-render`.
@@ -63,7 +108,7 @@ pub enum SliceError {
     /// One component has invalid connector context.
     #[error("component {component}: {source}")]
     Context {
-        /// Component name or UUID when the name is missing.
+        /// Component name or spec hash when the name is missing.
         component: String,
         /// Context-specific failure.
         source: ContextError,
@@ -71,45 +116,70 @@ pub enum SliceError {
 }
 
 impl DesiredSlice {
-    /// Validate an owned protobuf request, using retained identity for an empty
-    /// former-owner slice.
+    /// Validate a borrowed request view, copying only accepted domain state.
     pub fn from_request(
-        request: &ReconcileSliceRequest,
+        request: &ReconcileSliceRequestView<'_>,
         retained_environment: Option<&str>,
     ) -> Result<Self, SliceError> {
         let slice = request
             .slice
             .as_option()
             .ok_or_else(|| SliceError::Invalid("slice is required".into()))?;
-        let graph_id = uuid_bytes(slice.graph_id.as_deref(), "slice.graph_id")?;
+        Self::from_parts(slice, &request.superseded_components, retained_environment)
+    }
+
+    /// Validate an exact slice recovered from core. Superseded specs are not
+    /// needed because the durable environment binding is already retained.
+    pub fn from_recovered(
+        slice: &GraphSlice,
+        retained_environment: &str,
+    ) -> Result<Self, SliceError> {
+        let bytes = slice.encode_to_vec();
+        let view = henosis_proto::proto::henosis::v1::GraphSliceView::decode_view(&bytes)
+            .map_err(|error| SliceError::Invalid(error.to_string()))?;
+        Self::from_parts(&view, &[], Some(retained_environment))
+    }
+
+    fn from_parts<'a>(
+        slice: &henosis_proto::proto::henosis::v1::GraphSliceView<'a>,
+        superseded: &[RegisteredComponentSpecView<'a>],
+        retained_environment: Option<&str>,
+    ) -> Result<Self, SliceError> {
+        let graph_id = uuid_bytes(slice.graph_id, "slice.graph_id")?;
         let generation = slice.generation.filter(|value| *value > 0).ok_or_else(|| {
             SliceError::Invalid("slice.generation must be greater than zero".into())
         })?;
-        if slice.connector.as_deref() != Some(crate::CONNECTOR_NAME) {
+        let sequence = slice
+            .sequence
+            .ok_or_else(|| SliceError::Invalid("slice.sequence is required".into()))?;
+        if slice.connector != Some(crate::CONNECTOR_NAME) {
             return Err(SliceError::Invalid(format!(
                 "slice.connector must be {:?}",
                 crate::CONNECTOR_NAME
             )));
         }
 
-        let mut components = BTreeMap::new();
-        let mut component_ids = BTreeSet::new();
+        let mut components = IdOrdMap::with_capacity(slice.components.len());
+        let mut component_names = BTreeSet::new();
         let mut environment = retained_environment.map(str::to_owned);
-        for component in &slice.components {
-            let (name, pin) = parse_component(component, &mut environment)?;
-            if !component_ids.insert(pin.id) {
+        for component in slice.components.iter() {
+            let pin = parse_component(component, &mut environment)?;
+            if !component_names.insert(pin.name.clone()) {
                 return Err(SliceError::Invalid(format!(
-                    "component {name:?} duplicates an owned component ID"
+                    "component name {:?} is duplicated",
+                    pin.name
                 )));
             }
-            if components.insert(name.clone(), pin).is_some() {
-                return Err(SliceError::Invalid(format!(
-                    "component name {name:?} is duplicated"
-                )));
-            }
+            let hash = pin.spec_hash;
+            components.insert_unique(pin).map_err(|_| {
+                SliceError::Invalid(format!(
+                    "component spec hash {} is duplicated",
+                    hex::encode(hash)
+                ))
+            })?;
         }
 
-        for component in &request.superseded_components {
+        for component in superseded {
             let _ = parse_component(component, &mut environment)?;
         }
         let environment = environment.ok_or_else(|| {
@@ -120,11 +190,43 @@ impl DesiredSlice {
             )
         })?;
 
+        let mut upstream_outputs = IdOrdMap::with_capacity(slice.upstream_outputs.len());
+        for output in slice.upstream_outputs.iter() {
+            let component_spec_hash = hash_bytes(
+                output.component_spec_hash,
+                "slice.upstream_outputs.component_spec_hash",
+            )?;
+            let value: serde_json::Value = serde_json::from_slice(
+                output.values_json.unwrap_or_default(),
+            )
+            .map_err(|error| {
+                SliceError::Invalid(format!(
+                    "upstream output {} is not JSON: {error}",
+                    hex::encode(component_spec_hash)
+                ))
+            })?;
+            let values_json = serde_json::to_vec(&value)
+                .map_err(|error| SliceError::Invalid(error.to_string()))?;
+            upstream_outputs
+                .insert_unique(UpstreamOutput {
+                    component_spec_hash,
+                    values_json,
+                })
+                .map_err(|_| {
+                    SliceError::Invalid(format!(
+                        "upstream output spec hash {} is duplicated",
+                        hex::encode(component_spec_hash)
+                    ))
+                })?;
+        }
+
         Ok(Self {
             graph_id,
             generation,
+            sequence,
             environment,
             components,
+            upstream_outputs,
         })
     }
 
@@ -135,9 +237,9 @@ impl DesiredSlice {
             components: self
                 .components
                 .iter()
-                .map(|(name, pin)| {
+                .map(|pin| {
                     (
-                        name.as_str(),
+                        pin.name.as_str(),
                         ManifestComponent {
                             repo: &pin.context.source.repository,
                             revision: &pin.context.source.revision,
@@ -151,30 +253,99 @@ impl DesiredSlice {
             SliceError::Invalid(format!("could not encode render manifest: {error}"))
         })
     }
+
+    /// Find a component by its platform manifest name.
+    pub fn component_named(&self, name: &str) -> Option<&ComponentPin> {
+        self.components
+            .iter()
+            .find(|component| component.name == name)
+    }
+
+    /// Sorted platform manifest component names.
+    pub fn component_names(&self) -> Vec<String> {
+        let mut names = self
+            .components
+            .iter()
+            .map(|component| component.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// Stable digest of every input that can affect this connector's output,
+    /// excluding only the durable sequence cursor.
+    pub fn materialization_digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"henosis.dev/k8s-materialization/v1\0");
+        hasher.update(&self.graph_id);
+        hasher.update(&self.generation.to_be_bytes());
+        for component in self.components.iter() {
+            hasher.update(&component.spec_hash);
+        }
+        for output in self.upstream_outputs.iter() {
+            hasher.update(&output.component_spec_hash);
+            hasher.update(&(output.values_json.len() as u64).to_be_bytes());
+            hasher.update(&output.values_json);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Versioned SHA-256 graph digest embedded in environment publications.
+    pub fn graph_digest(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"henosis.dev/k8s-graph-generation/v1\0");
+        hasher.update(self.graph_id);
+        hasher.update(self.generation.to_be_bytes());
+        for component in self.components.iter() {
+            hasher.update(component.spec_hash);
+        }
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
 }
 
 fn parse_component(
-    component: &Component,
+    component: &RegisteredComponentSpecView<'_>,
     environment: &mut Option<String>,
-) -> Result<(String, ComponentPin), SliceError> {
-    let id = uuid_bytes(component.id.as_deref(), "component.id")?;
-    let fallback = hex::encode(id);
-    let name = component
+) -> Result<ComponentPin, SliceError> {
+    let spec_hash = hash_bytes(component.hash, "component.hash")?;
+    let fallback = hex::encode(spec_hash);
+    let spec = component
+        .spec
+        .as_option()
+        .ok_or_else(|| SliceError::Invalid(format!("component {fallback} has no spec body")))?;
+    let encoded = spec
+        .to_owned_message()
+        .map_err(|error| SliceError::Invalid(error.to_string()))?
+        .encode_to_vec();
+    if blake3::hash(&encoded).as_bytes() != &spec_hash {
+        return Err(SliceError::Invalid(format!(
+            "component {fallback} hash does not match its canonical spec content"
+        )));
+    }
+    let name = spec
         .name
-        .as_deref()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| SliceError::Invalid(format!("component {fallback} has no name")))?;
-    validate_dns_label(name, "component.name").map_err(|source| SliceError::Context {
+    validate_dns_label(name, "component.spec.name").map_err(|source| SliceError::Context {
         component: name.into(),
         source,
     })?;
-    if component.connector.as_deref() != Some(crate::CONNECTOR_NAME) {
+    if spec.connector != Some(crate::CONNECTOR_NAME) {
         return Err(SliceError::Invalid(format!(
             "component {name:?} is not owned by connector {:?}",
             crate::CONNECTOR_NAME
         )));
     }
-    let context = ComponentContext::from_bytes(component.context.as_deref().unwrap_or_default())
+    let mut dependencies = BTreeSet::new();
+    for dependency in spec.depends_on.iter() {
+        let dependency = hash_bytes(Some(dependency), "component.spec.depends_on")?;
+        if !dependencies.insert(dependency) {
+            return Err(SliceError::Invalid(format!(
+                "component {name:?} repeats a dependency spec hash"
+            )));
+        }
+    }
+    let context = ComponentContext::from_bytes(spec.connector_context.unwrap_or_default())
         .map_err(|source| SliceError::Context {
             component: name.into(),
             source,
@@ -189,19 +360,11 @@ fn parse_component(
         None => *environment = Some(context.environment.id.clone()),
         _ => {}
     }
-    let revision = component.revision.as_option().ok_or_else(|| {
-        SliceError::Invalid(format!(
-            "component {name:?} is missing its immutable revision"
-        ))
-    })?;
-    if revision.source.as_deref() != Some(&context.source.repository)
-        || revision.revision.as_deref() != Some(&context.source.revision)
-    {
-        return Err(SliceError::Invalid(format!(
-            "component {name:?} revision does not match its connector context source pin"
-        )));
-    }
-    Ok((name.into(), ComponentPin { id, context }))
+    Ok(ComponentPin {
+        spec_hash,
+        name: name.into(),
+        context,
+    })
 }
 
 fn uuid_bytes(value: Option<&[u8]>, field: &str) -> Result<[u8; 16], SliceError> {
@@ -210,11 +373,19 @@ fn uuid_bytes(value: Option<&[u8]>, field: &str) -> Result<[u8; 16], SliceError>
         .ok_or_else(|| SliceError::Invalid(format!("{field} must contain exactly 16 bytes")))
 }
 
+fn hash_bytes(value: Option<&[u8]>, field: &str) -> Result<[u8; 32], SliceError> {
+    value
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| SliceError::Invalid(format!("{field} must contain exactly 32 bytes")))
+}
+
 #[cfg(test)]
 mod tests {
     use buffa::MessageField;
-    use henosis_proto::proto::henosis::v1::ComponentRevision;
+    use henosis_proto::proto::henosis::v1::ComponentSpec;
     use henosis_proto::proto::henosis::v1::GraphSlice;
+    use henosis_proto::proto::henosis::v1::ReconcileSliceRequest;
+    use henosis_proto::proto::henosis::v1::RegisteredComponentSpec;
 
     use super::*;
     use crate::context::API_VERSION;
@@ -236,16 +407,16 @@ mod tests {
                 digest: format!("sha256:{}", "b".repeat(64)),
             },
         };
-        let component = Component {
-            id: Some(vec![2; 16]),
+        let spec = ComponentSpec {
             name: Some("service-a".into()),
-            revision: MessageField::some(ComponentRevision {
-                source: Some(context.source.repository.clone()),
-                revision: Some(context.source.revision.clone()),
-                ..Default::default()
-            }),
             connector: Some(crate::CONNECTOR_NAME.into()),
-            context: Some(serde_json::to_vec(&context).unwrap()),
+            connector_context: Some(serde_json::to_vec(&context).unwrap()),
+            ..Default::default()
+        };
+        let hash = blake3::hash(&spec.encode_to_vec()).as_bytes().to_vec();
+        let component = RegisteredComponentSpec {
+            hash: Some(hash),
+            spec: MessageField::some(spec),
             ..Default::default()
         };
         ReconcileSliceRequest {
@@ -254,28 +425,41 @@ mod tests {
                 generation: Some(1),
                 connector: Some(crate::CONNECTOR_NAME.into()),
                 components: vec![component],
+                sequence: Some(0),
                 ..Default::default()
             }),
             ..Default::default()
         }
     }
 
+    fn parse(request: &ReconcileSliceRequest) -> Result<DesiredSlice, SliceError> {
+        let bytes = request.encode_to_vec();
+        let view = ReconcileSliceRequestView::decode_view(&bytes).unwrap();
+        DesiredSlice::from_request(&view, None)
+    }
+
     #[test]
     fn builds_current_platform_manifest() {
-        let desired = DesiredSlice::from_request(&request(), None).unwrap();
+        let desired = parse(&request()).unwrap();
         let manifest = desired.manifest_toml(&desired.environment).unwrap();
         assert!(manifest.contains("id = \"preview_3jhc7x633z88188fzqhcbbrf84\""));
         assert!(manifest.contains("[components.service-a]"));
         assert!(manifest.contains("repo = \"henosis-playground/service-a\""));
+        assert_eq!(desired.sequence, 0);
     }
 
     #[test]
-    fn rejects_context_revision_skew() {
+    fn rejects_registered_spec_hash_skew() {
         let mut request = request();
-        request.slice.get_or_insert_default().components[0]
-            .revision
-            .get_or_insert_default()
-            .revision = Some("c".repeat(40));
-        assert!(DesiredSlice::from_request(&request, None).is_err());
+        request.slice.get_or_insert_default().components[0].hash = Some(vec![0; 32]);
+        assert!(parse(&request).is_err());
+    }
+
+    #[test]
+    fn graph_digest_is_sequence_independent() {
+        let mut desired = parse(&request()).unwrap();
+        let first = desired.graph_digest();
+        desired.sequence = 9;
+        assert_eq!(desired.graph_digest(), first);
     }
 }

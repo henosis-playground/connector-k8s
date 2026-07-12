@@ -17,7 +17,9 @@ use henosis_proto::proto::henosis::v1::ComponentDisposition;
 use henosis_proto::proto::henosis::v1::ComponentDispositionKind;
 use henosis_proto::proto::henosis::v1::Diagnostic;
 use henosis_proto::proto::henosis::v1::DiagnosticSeverity;
-use henosis_proto::proto::henosis::v1::ReconcileSliceRequest;
+use henosis_proto::proto::henosis::v1::FetchSliceRequest;
+use henosis_proto::proto::henosis::v1::GraphSlice;
+use henosis_proto::proto::henosis::v1::ReconcileSliceRequestView;
 use henosis_proto::proto::henosis::v1::ReportSliceRequest;
 use henosis_proto::proto::henosis::v1::SliceReport;
 use http::Uri;
@@ -52,6 +54,13 @@ pub trait Reporter: Send + Sync + 'static {
         &self,
         request: ReportSliceRequest,
     ) -> Pin<Box<dyn Future<Output = Result<(), ReportError>> + Send + '_>>;
+
+    /// Recover one exact durable materialization from core.
+    fn fetch_slice(
+        &self,
+        graph_id: [u8; 16],
+        sequence: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<GraphSlice, ReportError>> + Send + '_>>;
 }
 
 /// Core callback transport failure.
@@ -67,9 +76,12 @@ pub struct CoreReporter {
 
 impl CoreReporter {
     /// Build a plaintext `ConnectRPC` client for the compose network.
-    pub fn new(uri: Uri) -> Self {
-        let client =
-            ConnectorCallbackServiceClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
+    pub fn new(uri: Uri, token: Option<String>) -> Self {
+        let mut config = ClientConfig::new(uri);
+        if let Some(token) = token {
+            config = config.with_default_header("authorization", format!("Bearer {token}"));
+        }
+        let client = ConnectorCallbackServiceClient::new(HttpClient::plaintext(), config);
         Self { client }
     }
 }
@@ -85,6 +97,30 @@ impl Reporter for CoreReporter {
                 .await
                 .map(|_| ())
                 .map_err(|error| ReportError(error.to_string()))
+        })
+    }
+
+    fn fetch_slice(
+        &self,
+        graph_id: [u8; 16],
+        sequence: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<GraphSlice, ReportError>> + Send + '_>> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .fetch_slice(FetchSliceRequest {
+                    graph_id: Some(graph_id.to_vec()),
+                    connector: Some(crate::CONNECTOR_NAME.into()),
+                    sequence: Some(sequence),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|error| ReportError(error.to_string()))?
+                .into_owned();
+            response
+                .slice
+                .into_option()
+                .ok_or_else(|| ReportError("core omitted the recovered slice".into()))
         })
     }
 }
@@ -105,9 +141,9 @@ pub enum ReconcileError {
     /// The graph has been terminally retired.
     #[error("graph is retired")]
     Retired,
-    /// Equal generation was reused with a different desired level.
-    #[error("generation {0} was already accepted with different contents")]
-    GenerationConflict(u64),
+    /// Equal durable sequence was reused with a different materialized level.
+    #[error("slice sequence {0} was already accepted with different contents")]
+    SequenceConflict(u64),
     /// Durable local state could not be read or committed.
     #[error("connector state failure: {0}")]
     State(String),
@@ -130,7 +166,7 @@ pub struct Reconciler {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GraphState {
     environment: String,
-    desired: ReconcileSliceRequest,
+    desired: DesiredSlice,
     #[serde(default)]
     published: Option<PublishedState>,
     #[serde(default)]
@@ -141,8 +177,10 @@ struct GraphState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PublishedState {
-    generation: u64,
+    sequence: u64,
+    input_digest: [u8; 32],
     request_id: Vec<u8>,
+    publication_id: Option<Vec<u8>>,
     report: SliceReport,
     #[serde(default)]
     commit: Option<String>,
@@ -150,7 +188,8 @@ struct PublishedState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PendingProposalState {
-    generation: u64,
+    sequence: u64,
+    input_digest: [u8; 32],
     request_id: Vec<u8>,
     report: SliceReport,
     outputs: Vec<henosis_proto::proto::henosis::v1::ComponentOutputs>,
@@ -177,9 +216,16 @@ impl Reconciler {
     /// Durably accept a desired level and schedule one reconcile pass.
     pub async fn accept(
         self: &Arc<Self>,
-        request: ReconcileSliceRequest,
+        request: &ReconcileSliceRequestView<'_>,
     ) -> Result<u64, ReconcileError> {
-        let graph_id = request_graph_id(&request)?;
+        let graph_id = request
+            .slice
+            .as_option()
+            .and_then(|slice| slice.graph_id)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| {
+                ReconcileError::State("slice.graph_id must contain exactly 16 bytes".into())
+            })?;
         let lock = self.graph_lock(graph_id).await;
         let _guard = lock.lock().await;
         let current = self.load(graph_id)?;
@@ -187,22 +233,37 @@ impl Reconciler {
             return Err(ReconcileError::Retired);
         }
         let retained_environment = current.as_ref().map(|state| state.environment.as_str());
-        let desired = DesiredSlice::from_request(&request, retained_environment)?;
-        let generation = desired.generation;
+        let desired = DesiredSlice::from_request(request, retained_environment)?;
+        let sequence = desired.sequence;
         if let Some(state) = current {
-            let retained_generation = request_generation(&state.desired)?;
-            if generation < retained_generation {
-                return Ok(retained_generation);
+            let retained_sequence = state.desired.sequence;
+            if sequence < retained_sequence {
+                return Ok(retained_sequence);
             }
-            if generation == retained_generation && request != state.desired {
-                return Err(ReconcileError::GenerationConflict(generation));
+            if sequence == retained_sequence && desired != state.desired {
+                return Err(ReconcileError::SequenceConflict(sequence));
             }
-            if generation > retained_generation {
+            if sequence > retained_sequence {
+                if desired.generation < state.desired.generation {
+                    return Err(SliceError::Invalid(format!(
+                        "slice generation {} precedes retained generation {}",
+                        desired.generation, state.desired.generation
+                    ))
+                    .into());
+                }
+                if desired.generation == state.desired.generation
+                    && desired.graph_digest() != state.desired.graph_digest()
+                {
+                    return Err(SliceError::Invalid(
+                        "a later sequence at the same generation changed registered specs".into(),
+                    )
+                    .into());
+                }
                 self.save(
                     graph_id,
                     &GraphState {
-                        environment: desired.environment,
-                        desired: request,
+                        environment: desired.environment.clone(),
+                        desired,
                         published: state.published,
                         proposal: state.proposal,
                         retired: false,
@@ -213,8 +274,8 @@ impl Reconciler {
             self.save(
                 graph_id,
                 &GraphState {
-                    environment: desired.environment,
-                    desired: request,
+                    environment: desired.environment.clone(),
+                    desired,
                     published: None,
                     proposal: None,
                     retired: false,
@@ -224,9 +285,9 @@ impl Reconciler {
         drop(_guard);
         let reconciler = Arc::clone(self);
         tokio::spawn(async move {
-            let _ = reconciler.reconcile_once(graph_id, generation).await;
+            let _ = reconciler.reconcile_once(graph_id, sequence).await;
         });
-        Ok(generation)
+        Ok(sequence)
     }
 
     /// Resume every accepted non-retired desired level after process restart.
@@ -252,16 +313,34 @@ impl Reconciler {
             let graph_id: [u8; 16] = bytes
                 .try_into()
                 .map_err(|_| ReconcileError::State("invalid graph state filename".into()))?;
-            let state = self.load(graph_id)?.ok_or_else(|| {
-                ReconcileError::State("graph state disappeared during startup".into())
-            })?;
+            let state = match self.load(graph_id) {
+                Ok(Some(state)) => state,
+                Ok(None) => {
+                    return Err(ReconcileError::State(
+                        "graph state disappeared during startup".into(),
+                    ));
+                }
+                Err(_error) if is_pre_sequence_state(&entry.path()) => {
+                    archive_pre_sequence_state(&self.config.state_dir, &entry.path())?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if state.retired {
                 continue;
             }
-            let generation = request_generation(&state.desired)?;
+            let recovered = self
+                .reporter
+                .fetch_slice(graph_id, state.desired.sequence)
+                .await?;
+            let desired = DesiredSlice::from_recovered(&recovered, &state.environment)?;
+            if desired != state.desired {
+                return Err(ReconcileError::SequenceConflict(state.desired.sequence));
+            }
+            let sequence = state.desired.sequence;
             let reconciler = Arc::clone(self);
             tokio::spawn(async move {
-                let _ = reconciler.reconcile_once(graph_id, generation).await;
+                let _ = reconciler.reconcile_once(graph_id, sequence).await;
             });
             resumed += 1;
         }
@@ -269,17 +348,28 @@ impl Reconciler {
     }
 
     /// Delete native desired state and terminally fence a graph.
-    pub async fn retire(&self, graph_id: [u8; 16], generation: u64) -> Result<u64, ReconcileError> {
+    pub async fn retire(
+        &self,
+        graph_id: [u8; 16],
+        generation: u64,
+        sequence: u64,
+    ) -> Result<u64, ReconcileError> {
         let lock = self.graph_lock(graph_id).await;
         let _guard = lock.lock().await;
         let mut state = self
             .load(graph_id)?
             .ok_or_else(|| ReconcileError::State("cannot retire an unknown graph slice".into()))?;
-        let retained_generation = request_generation(&state.desired)?;
+        let retained_generation = state.desired.generation;
         if generation != retained_generation {
             return Err(ReconcileError::State(format!(
                 "retire generation {generation} does not match retained generation \
                  {retained_generation}"
+            )));
+        }
+        if sequence < state.desired.sequence {
+            return Err(ReconcileError::State(format!(
+                "retire sequence {sequence} precedes retained sequence {}",
+                state.desired.sequence
             )));
         }
         if state.retired {
@@ -299,25 +389,28 @@ impl Reconciler {
     async fn reconcile_once(
         self: Arc<Self>,
         graph_id: [u8; 16],
-        expected_generation: u64,
+        expected_sequence: u64,
     ) -> Result<(), ReconcileError> {
         let lock = self.graph_lock(graph_id).await;
         let _guard = lock.lock().await;
         let mut state = self
             .load(graph_id)?
             .ok_or_else(|| ReconcileError::State("accepted graph state is missing".into()))?;
-        if state.retired || request_generation(&state.desired)? != expected_generation {
+        if state.retired || state.desired.sequence != expected_sequence {
             return Ok(());
         }
-        let desired = DesiredSlice::from_request(&state.desired, Some(&state.environment))?;
+        let desired = state.desired.clone();
         let policy = self.engine.publication_policy(&desired.environment);
         let graph = hex::encode(graph_id);
         let generation = desired.generation.to_string();
+        let sequence = desired.sequence.to_string();
+        let input_digest = desired.materialization_digest();
         let span = tracing::span!(
             Level::INFO,
             "k8s.reconcile_slice",
             soter.henosis.graph.id = %graph,
             soter.henosis.graph.generation = %generation,
+            { crate::telemetry::SLICE_SEQUENCE } = %sequence,
             soter.henosis.environment.id = %desired.environment,
             soter.henosis.slice.component_count = desired.components.len(),
             soter.henosis.publication.policy = publication_policy_name(policy),
@@ -327,10 +420,14 @@ impl Reconciler {
         );
         async {
             if let Some(published) = &state.published
-                && published.generation == desired.generation
+                && published.sequence == desired.sequence
             {
-                self.report_snapshot(&published.request_id, &published.report)
-                    .await?;
+                self.report_snapshot(
+                    &published.request_id,
+                    published.publication_id.as_deref(),
+                    &published.report,
+                )
+                .await?;
                 Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "already_published");
                 if let Some(commit) = &published.commit {
                     Span::current().record(crate::telemetry::PUBLISHED_COMMIT, commit);
@@ -338,9 +435,51 @@ impl Reconciler {
                 return Ok(());
             }
 
+            if let Some(previous) = &state.published
+                && previous.input_digest == input_digest
+            {
+                let report = report_for(
+                    &desired,
+                    ComponentDispositionKind::Ready,
+                    previous.report.outputs.clone(),
+                    Vec::new(),
+                );
+                let published = PublishedState {
+                    sequence: desired.sequence,
+                    input_digest,
+                    request_id: new_request_id(),
+                    publication_id: previous.publication_id.clone(),
+                    report,
+                    commit: previous.commit.clone(),
+                };
+                state.published = Some(published.clone());
+                self.save(graph_id, &state)?;
+                self.report_snapshot(
+                    &published.request_id,
+                    published.publication_id.as_deref(),
+                    &published.report,
+                )
+                .await?;
+                Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "level_republished");
+                if let Some(commit) = &published.commit {
+                    Span::current().record(crate::telemetry::PUBLISHED_COMMIT, commit);
+                }
+                return Ok(());
+            }
+
+            if let Some(pending) = &mut state.proposal
+                && pending.input_digest == input_digest
+                && pending.sequence != desired.sequence
+            {
+                pending.sequence = desired.sequence;
+                pending.request_id = new_request_id();
+                pending.report = awaiting_review_report(&desired, &pending.proposal.url);
+                self.save(graph_id, &state)?;
+            }
+
             if policy == PublicationPolicy::PrGated
                 && let Some(pending) = &state.proposal
-                && pending.generation == desired.generation
+                && pending.sequence == desired.sequence
             {
                 Span::current().record(
                     crate::telemetry::PROPOSAL_NUMBER,
@@ -348,8 +487,8 @@ impl Reconciler {
                 );
                 match self.engine.proposal_status(&pending.proposal).await? {
                     ProposalStatus::Open => {
-                        self.schedule_reconcile(graph_id, desired.generation);
-                        self.report_snapshot(&pending.request_id, &pending.report)
+                        self.schedule_reconcile(graph_id, desired.sequence);
+                        self.report_snapshot(&pending.request_id, None, &pending.report)
                             .await?;
                         Span::current()
                             .record(crate::telemetry::RECONCILE_OUTCOME, "awaiting_review");
@@ -363,16 +502,22 @@ impl Reconciler {
                             Vec::new(),
                         );
                         let published = PublishedState {
-                            generation: desired.generation,
-                            request_id: stable_report_id(&report),
+                            sequence: desired.sequence,
+                            input_digest,
+                            request_id: new_request_id(),
+                            publication_id: stable_publication_id(&report),
                             report,
                             commit: Some(commit.clone()),
                         };
                         state.published = Some(published.clone());
                         let proposal = state.proposal.take().expect("proposal was inspected");
                         self.save(graph_id, &state)?;
-                        self.report_snapshot(&published.request_id, &published.report)
-                            .await?;
+                        self.report_snapshot(
+                            &published.request_id,
+                            published.publication_id.as_deref(),
+                            &published.report,
+                        )
+                        .await?;
                         let _ = self.engine.remove_proposal_branch(&proposal.proposal).await;
                         Span::current()
                             .record(crate::telemetry::RECONCILE_OUTCOME, "proposal_merged");
@@ -390,7 +535,7 @@ impl Reconciler {
                                 DiagnosticSeverity::Error,
                             )],
                         );
-                        let _ = self.reporter.report(report_request(report, false)).await;
+                        let _ = self.reporter.report(report_request(report)).await;
                         Span::current()
                             .record(crate::telemetry::RECONCILE_OUTCOME, "proposal_closed");
                         return Ok(());
@@ -404,10 +549,7 @@ impl Reconciler {
                 Vec::new(),
                 Vec::new(),
             );
-            let _ = self
-                .reporter
-                .report(report_request(reconciling, false))
-                .await;
+            let _ = self.reporter.report(report_request(reconciling)).await;
 
             if let Some(pending) = state.proposal.take()
                 && (desired.components.is_empty() || policy == PublicationPolicy::Direct)
@@ -434,7 +576,7 @@ impl Reconciler {
                         DiagnosticSeverity::Error,
                     )],
                 );
-                let _ = self.reporter.report(report_request(report, false)).await;
+                let _ = self.reporter.report(report_request(report)).await;
                 Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "failed");
                 return Ok(());
             }
@@ -462,8 +604,9 @@ impl Reconciler {
                         Ok(ProposalPublication::Awaiting(proposal)) => {
                             let report = awaiting_review_report(&desired, &proposal.url);
                             let pending = PendingProposalState {
-                                generation: desired.generation,
-                                request_id: stable_report_id(&report),
+                                sequence: desired.sequence,
+                                input_digest,
+                                request_id: new_request_id(),
                                 report,
                                 outputs: world.outputs,
                                 proposal,
@@ -474,8 +617,8 @@ impl Reconciler {
                             );
                             state.proposal = Some(pending.clone());
                             self.save(graph_id, &state)?;
-                            self.schedule_reconcile(graph_id, desired.generation);
-                            self.report_snapshot(&pending.request_id, &pending.report)
+                            self.schedule_reconcile(graph_id, desired.sequence);
+                            self.report_snapshot(&pending.request_id, None, &pending.report)
                                 .await?;
                             Span::current()
                                 .record(crate::telemetry::RECONCILE_OUTCOME, "awaiting_review");
@@ -501,17 +644,22 @@ impl Reconciler {
                 outputs,
                 Vec::new(),
             );
-            let request_id = stable_report_id(&report);
             let published = PublishedState {
-                generation: desired.generation,
-                request_id,
+                sequence: desired.sequence,
+                input_digest,
+                request_id: new_request_id(),
+                publication_id: stable_publication_id(&report),
                 report,
                 commit: commit.clone(),
             };
             state.published = Some(published.clone());
             self.save(graph_id, &state)?;
-            self.report_snapshot(&published.request_id, &published.report)
-                .await?;
+            self.report_snapshot(
+                &published.request_id,
+                published.publication_id.as_deref(),
+                &published.report,
+            )
+            .await?;
             Span::current().record(crate::telemetry::RECONCILE_OUTCOME, "published");
             if let Some(commit) = commit {
                 Span::current().record(crate::telemetry::PUBLISHED_COMMIT, commit);
@@ -529,17 +677,19 @@ impl Reconciler {
             Vec::new(),
             error.diagnostics().to_vec(),
         );
-        let _ = self.reporter.report(report_request(report, false)).await;
+        let _ = self.reporter.report(report_request(report)).await;
     }
 
     async fn report_snapshot(
         &self,
         request_id: &[u8],
+        publication_id: Option<&[u8]>,
         report: &SliceReport,
     ) -> Result<(), ReportError> {
         let request = ReportSliceRequest {
             request_id: Some(request_id.to_vec()),
             report: buffa::MessageField::some(report.clone()),
+            publication_id: publication_id.map(<[u8]>::to_vec),
             ..Default::default()
         };
         let mut last = None;
@@ -555,11 +705,11 @@ impl Reconciler {
         Err(last.unwrap_or_else(|| ReportError("report retry loop did not run".into())))
     }
 
-    fn schedule_reconcile(self: &Arc<Self>, graph_id: [u8; 16], generation: u64) {
+    fn schedule_reconcile(self: &Arc<Self>, graph_id: [u8; 16], sequence: u64) {
         let reconciler = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(15)).await;
-            let _ = reconciler.reconcile_once(graph_id, generation).await;
+            let _ = reconciler.reconcile_once(graph_id, sequence).await;
         });
     }
 
@@ -619,10 +769,10 @@ fn report_for(
 ) -> SliceReport {
     let dispositions = desired
         .components
-        .values()
+        .iter()
         .map(|component| {
             ComponentDisposition::default()
-                .with_component_id(component.id.to_vec())
+                .with_component_spec_hash(component.spec_hash.to_vec())
                 .with_kind(kind)
         })
         .collect();
@@ -633,6 +783,7 @@ fn report_for(
         dispositions,
         outputs,
         diagnostics,
+        sequence: Some(desired.sequence),
         ..Default::default()
     }
 }
@@ -664,40 +815,36 @@ const fn publication_policy_name(policy: PublicationPolicy) -> &'static str {
     }
 }
 
-fn report_request(report: SliceReport, stable: bool) -> ReportSliceRequest {
-    let request_id = if stable {
-        stable_report_id(&report)
-    } else {
-        Uuid::now_v7().as_bytes().to_vec()
-    };
+fn report_request(report: SliceReport) -> ReportSliceRequest {
     ReportSliceRequest {
-        request_id: Some(request_id),
+        request_id: Some(new_request_id()),
         report: buffa::MessageField::some(report),
         ..Default::default()
     }
 }
 
-fn stable_report_id(report: &SliceReport) -> Vec<u8> {
-    let bytes = serde_json::to_vec(report).expect("generated report is JSON serializable");
-    Uuid::new_v5(&REPORT_NAMESPACE, &bytes).as_bytes().to_vec()
+fn new_request_id() -> Vec<u8> {
+    Uuid::now_v7().as_bytes().to_vec()
 }
 
-fn request_graph_id(request: &ReconcileSliceRequest) -> Result<[u8; 16], ReconcileError> {
-    request
-        .slice
-        .as_option()
-        .and_then(|slice| slice.graph_id.as_deref())
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| ReconcileError::State("slice.graph_id must contain exactly 16 bytes".into()))
-}
-
-fn request_generation(request: &ReconcileSliceRequest) -> Result<u64, ReconcileError> {
-    request
-        .slice
-        .as_option()
-        .and_then(|slice| slice.generation)
-        .filter(|generation| *generation > 0)
-        .ok_or_else(|| ReconcileError::State("slice.generation is missing".into()))
+fn stable_publication_id(report: &SliceReport) -> Option<Vec<u8>> {
+    if report.outputs.is_empty() {
+        return None;
+    }
+    let mut name = Vec::new();
+    name.extend_from_slice(b"henosis.dev/k8s-publication/v1\0");
+    name.extend_from_slice(report.graph_id.as_deref().unwrap_or_default());
+    name.extend_from_slice(&report.generation.unwrap_or_default().to_be_bytes());
+    name.extend_from_slice(report.connector.as_deref().unwrap_or_default().as_bytes());
+    let mut outputs = report.outputs.iter().collect::<Vec<_>>();
+    outputs.sort_by_key(|output| output.component_spec_hash.as_deref().unwrap_or_default());
+    for output in outputs {
+        name.extend_from_slice(output.component_spec_hash.as_deref().unwrap_or_default());
+        let values = output.values_json.as_deref().unwrap_or_default();
+        name.extend_from_slice(&(values.len() as u64).to_be_bytes());
+        name.extend_from_slice(values);
+    }
+    Some(Uuid::new_v5(&REPORT_NAMESPACE, &name).as_bytes().to_vec())
 }
 
 fn sync_directory(directory: &Path) -> Result<(), ReconcileError> {
@@ -706,10 +853,84 @@ fn sync_directory(directory: &Path) -> Result<(), ReconcileError> {
         .map_err(|error| ReconcileError::State(error.to_string()))
 }
 
+fn is_pre_sequence_state(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    value
+        .get("desired")
+        .and_then(|desired| desired.get("slice"))
+        .is_some()
+}
+
+fn archive_pre_sequence_state(state_dir: &Path, path: &Path) -> Result<(), ReconcileError> {
+    let archive = state_dir.join("pre-sequence-v0");
+    fs::create_dir_all(&archive).map_err(|error| ReconcileError::State(error.to_string()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| ReconcileError::State("legacy state path has no filename".into()))?;
+    let destination = archive.join(name);
+    if destination.exists() {
+        return Err(ReconcileError::State(format!(
+            "legacy state archive already contains {}",
+            destination.display()
+        )));
+    }
+    fs::rename(path, &destination).map_err(|error| ReconcileError::State(error.to_string()))?;
+    sync_directory(state_dir)?;
+    sync_directory(&archive)
+}
+
 /// Build a connector-owned diagnostic for request-boundary validation failures.
 pub fn validation_diagnostic(error: &ReconcileError) -> Diagnostic {
     Diagnostic::default()
         .with_code("k8s.context.invalid")
         .with_message(error.to_string())
         .with_severity(DiagnosticSeverity::Error)
+}
+
+#[cfg(test)]
+mod tests {
+    use henosis_proto::proto::henosis::v1::ComponentOutputs;
+
+    use super::*;
+
+    fn ready_report(sequence: u64, values: &[u8]) -> SliceReport {
+        SliceReport {
+            graph_id: Some(vec![1; 16]),
+            generation: Some(7),
+            connector: Some(crate::CONNECTOR_NAME.into()),
+            outputs: vec![
+                ComponentOutputs::default()
+                    .with_component_spec_hash(vec![2; 32])
+                    .with_values_json(values.to_vec()),
+            ],
+            sequence: Some(sequence),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn publication_identity_ignores_slice_sequence() {
+        assert_eq!(
+            stable_publication_id(&ready_report(4, br#"{"url":"a"}"#)),
+            stable_publication_id(&ready_report(5, br#"{"url":"a"}"#))
+        );
+    }
+
+    #[test]
+    fn publication_identity_changes_with_complete_outputs() {
+        assert_ne!(
+            stable_publication_id(&ready_report(4, br#"{"url":"a"}"#)),
+            stable_publication_id(&ready_report(4, br#"{"url":"b"}"#))
+        );
+    }
+
+    #[test]
+    fn non_publishing_report_has_no_publication_identity() {
+        assert_eq!(stable_publication_id(&SliceReport::default()), None);
+    }
 }

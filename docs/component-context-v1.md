@@ -1,8 +1,9 @@
 # Kubernetes component context v1
 
-`henosis.v1.Component.context` is opaque to core. For components assigned to connector `k8s`, its
-bytes MUST be UTF-8 JSON matching this document. Producers MUST emit `apiVersion` exactly as shown;
-the connector rejects unknown versions, unknown fields, missing fields, and malformed pins.
+`henosis.v1.ComponentSpec.connector_context` is opaque to core. For registered specs assigned to
+connector `k8s`, its bytes MUST be UTF-8 JSON matching this document. Producers MUST emit
+`apiVersion` exactly as shown; the connector rejects unknown versions, unknown fields, missing
+fields, and malformed pins.
 
 ```json
 {
@@ -27,14 +28,19 @@ The vocabulary is deliberately the smallest complete platform manifest pin:
   with prefix `preview`. The stable token `preview`, legacy `preview-...` UUIDs, custom preview
   slugs, uppercase suffixes, and non-canonical TypeID suffixes are rejected.
 - `source.repository` is a GitHub `owner/name`, without a URL or `.git` suffix.
-- `source.revision` is a full, immutable, 40-character lowercase Git commit SHA. It MUST equal the
-  enclosing `Component.revision.revision`; `source.repository` MUST equal
-  `Component.revision.source`.
+- `source.revision` is a full, immutable, 40-character lowercase Git commit SHA.
 - `image.digest` is an immutable lowercase `sha256:` OCI digest with exactly 64 hex characters.
 
-Every component in a complete slice MUST repeat the same `environment.id`. That identity is immutable
-for a graph after the connector accepts its first generation. `Component.name` becomes the platform
-manifest component key and MUST be a lowercase DNS label; names and component IDs MUST both be unique.
+Core has no `ComponentRevision` vocabulary. `source.repository` and `source.revision` in these bytes
+are the sole repository/SHA provenance accepted by this connector; there is intentionally no second
+wire field to cross-check. This removal does not change the context byte shape, so context v1 is not
+bumped.
+
+Every registered spec in a complete slice MUST repeat the same `environment.id`. That identity is
+immutable for a graph after the connector accepts its first slice sequence. `ComponentSpec.name`
+becomes the platform manifest component key and MUST be a lowercase DNS label; names and registered
+component-spec hashes MUST both be unique. The connector verifies each supplied BLAKE3 spec hash
+against the canonical materialized `ComponentSpec` before reading its context.
 
 The connector translates the complete owned slice into the existing renderer input without adding
 defaults:
@@ -56,8 +62,9 @@ the pushed slice contains the resulting immutable source pins. `borrowForPreview
 metadata discovered inside the pinned component package by the renderer.
 
 For an empty former-owner slice, core supplies `superseded_components`; their v1 contexts recover the
-environment branch that must be removed. Retirement supplies the last complete slice, while the
-connector's durable accepted level provides the same identity after a process restart.
+environment branch that must be removed. Retirement supplies the last complete slice. The connector
+durably retains the validated environment binding and recovers an accepted materialization from core
+by exact slice sequence after a process restart.
 
 ## Publication and outputs
 
@@ -66,7 +73,8 @@ Rendering completes in a temporary directory and its `manifest.json` component s
 the complete desired slice before publication. The connector's per-environment policy then either
 pushes that complete tree directly with force-with-lease or proposes it through the PR-gated flow in
 [review-projection-v1.md](review-projection-v1.md). A failed render or validation never changes the
-applied tree.
+applied tree. Before publication, the connector adds the versioned receipt specified in
+[generation-receipt-v1.md](generation-receipt-v1.md) to the verified renderer manifest.
 
 Each renderer `manifest.json` component `outputs` object is serialized as deterministic JSON and
 reported as that component's complete `ComponentOutputs.values_json`. The connector reports every

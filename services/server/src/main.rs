@@ -50,7 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         publication_policies: publication_policies()?,
     })?;
     let core_uri = string_env("HENOSIS_CORE_URL", "http://core:8080").parse::<Uri>()?;
-    let reporter = Arc::new(CoreReporter::new(core_uri));
+    let core_token = env::var("HENOSIS_CORE_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    let reporter = Arc::new(CoreReporter::new(core_uri, core_token));
     let reconciler = Arc::new(Reconciler::new(
         ReconcilerConfig { state_dir },
         engine,

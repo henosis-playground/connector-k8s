@@ -7,7 +7,7 @@ use thiserror::Error;
 /// Current wire-level context version.
 pub const API_VERSION: &str = "henosis.dev/k8s-component-context/v1";
 
-/// Strict JSON object carried in `henosis.v1.Component.context`.
+/// Strict JSON object carried in `ComponentSpec.connector_context`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ComponentContext {

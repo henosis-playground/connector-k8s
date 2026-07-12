@@ -61,9 +61,10 @@ environment changes. This is complete and deterministic, but file-granular: a ch
 `k8s.yaml` does not reveal which Kubernetes resources changed. That is the first known place to
 consider a v2 native-object projection if this experiment survives.
 
-The projection intentionally has no graph generation or contract slice-sequence field. Its exact
-proposal commit is the publication-side identity. This keeps the format stable while the shared
-contract adds independent slice-sequence and publication identities.
+The projection intentionally has no graph generation or contract slice-sequence field. The exact
+proposal commit identifies the review, while the proposed `manifest.json` carries the versioned
+[generation receipt](generation-receipt-v1.md). This keeps the review format stable while making the
+eventual target commit generation-resolvable under any GitHub merge strategy.
 
 ## Publication policies
 

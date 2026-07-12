@@ -8,9 +8,14 @@ recipe, renders and validates the whole Kubernetes world, atomically publishes t
 deploy repository's `env/<environment>` branch, and reports one complete observation to core.
 
 The connector-owned bytes that authoring and collector integrations place in
-`Component.context` are specified in [docs/component-context-v1.md](docs/component-context-v1.md).
-The format is strict and versioned; it carries the environment identity, source repository and
-immutable revision, and image digest needed by the current renderer.
+`ComponentSpec.connector_context` are specified in
+[docs/component-context-v1.md](docs/component-context-v1.md). The format is strict and versioned;
+it is the sole source of repository/SHA provenance and also carries the environment identity and
+image digest needed by the current renderer.
+
+Every non-empty published environment tree embeds a generation-resolvable receipt in
+`manifest.json`, specified in
+[docs/generation-receipt-v1.md](docs/generation-receipt-v1.md).
 
 Per-environment direct and pull-request-gated publication, including the reusable human/machine
 review projection, are specified in
@@ -22,6 +27,7 @@ review projection, are specified in
 |---|---|---|
 | `HENOSIS_BIND` | `0.0.0.0:8081` | ConnectRPC listen address |
 | `HENOSIS_CORE_URL` | `http://core:8080` | Core callback service origin |
+| `HENOSIS_CORE_TOKEN` | unset | Optional bearer token for core callback and recovery RPCs |
 | `HENOSIS_STATE_DIR` | `/var/lib/henosis-connector-k8s/state` | Durable accepted levels and publication checkpoints |
 | `HENOSIS_PREPARE_RUNNER` | `/opt/henosis/platform/scripts/prepare-runner.sh` | Platform D24 recipe |
 | `HENOSIS_PLATFORM_REF` | `origin/main` | Platform ref resolved to an immutable SHA per invocation |

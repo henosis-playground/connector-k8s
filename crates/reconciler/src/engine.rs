@@ -240,6 +240,7 @@ impl Engine {
             return Err(render_command_error(&rendered, desired));
         }
         let outputs = read_render_outputs(&output_dir, desired)?;
+        embed_generation_receipt(&output_dir, desired)?;
         Ok(RenderedWorld {
             _temporary: temporary,
             output_dir,
@@ -402,7 +403,7 @@ impl Engine {
         )
         .await?;
 
-        let component_names = desired.components.keys().cloned().collect::<Vec<_>>();
+        let component_names = desired.component_names();
         let projection = ReviewProjection::from_name_status(
             &desired.environment,
             target_branch.clone(),
@@ -833,6 +834,16 @@ struct RendererComponent {
     outputs: serde_json::Value,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationReceipt {
+    api_version: &'static str,
+    graph_id: String,
+    generation: String,
+    graph_digest: String,
+    component_spec_hashes: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct GateReport {
     failures: Vec<GateFailure>,
@@ -877,7 +888,10 @@ fn read_render_outputs(
             "renderer returned a different environment identity",
         ));
     }
-    let expected = desired.components.keys().cloned().collect::<BTreeSet<_>>();
+    let expected = desired
+        .component_names()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let actual = manifest.components.keys().cloned().collect::<BTreeSet<_>>();
     if expected != actual {
         return Err(simple_error(
@@ -889,14 +903,58 @@ fn read_render_outputs(
         .components
         .into_iter()
         .map(|(name, rendered)| {
-            let id = desired.components[&name].id.to_vec();
+            let spec_hash = desired
+                .component_named(&name)
+                .expect("renderer component set was checked")
+                .spec_hash
+                .to_vec();
             let values = serde_json::to_vec(&rendered.outputs)
                 .map_err(|error| simple_error("k8s.renderer.output", &error.to_string()))?;
             Ok(ComponentOutputs::default()
-                .with_component_id(id)
+                .with_component_spec_hash(spec_hash)
                 .with_values_json(values))
         })
         .collect()
+}
+
+fn embed_generation_receipt(output_dir: &Path, desired: &DesiredSlice) -> Result<(), EngineError> {
+    let path = output_dir.join("manifest.json");
+    let bytes = fs::read(&path)
+        .map_err(|error| io_error("k8s.publisher.receipt", "read renderer manifest", error))?;
+    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| simple_error("k8s.publisher.receipt", &error.to_string()))?;
+    let object = manifest.as_object_mut().ok_or_else(|| {
+        simple_error(
+            "k8s.publisher.receipt",
+            "renderer manifest must be a JSON object",
+        )
+    })?;
+    if object.contains_key("henosis") {
+        return Err(simple_error(
+            "k8s.publisher.receipt",
+            "renderer manifest already defines the reserved henosis field",
+        ));
+    }
+    let receipt = GenerationReceipt {
+        api_version: "henosis.dev/generation-receipt/v1",
+        graph_id: hex::encode(desired.graph_id),
+        generation: desired.generation.to_string(),
+        graph_digest: desired.graph_digest(),
+        component_spec_hashes: desired
+            .components
+            .iter()
+            .map(|component| hex::encode(component.spec_hash))
+            .collect(),
+    };
+    object.insert(
+        "henosis".into(),
+        serde_json::to_value(receipt)
+            .map_err(|error| simple_error("k8s.publisher.receipt", &error.to_string()))?,
+    );
+    let bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| simple_error("k8s.publisher.receipt", &error.to_string()))?;
+    fs::write(path, bytes)
+        .map_err(|error| io_error("k8s.publisher.receipt", "write generation receipt", error))
 }
 
 fn render_command_error(output: &Output, desired: &DesiredSlice) -> EngineError {
@@ -930,8 +988,8 @@ fn failure_diagnostic(failure: GateFailure, desired: &DesiredSlice) -> Diagnosti
             .with_code(issue.code)
             .with_message(issue.message)
             .with_severity(DiagnosticSeverity::Error);
-        if let Some(pin) = desired.components.get(&issue.component) {
-            diagnostic = diagnostic.with_component_id(pin.id.to_vec());
+        if let Some(pin) = desired.component_named(&issue.component) {
+            diagnostic = diagnostic.with_component_spec_hash(pin.spec_hash.to_vec());
         }
         if let Some(record) = issue.record {
             diagnostic = diagnostic.with_pointer(record.path);
@@ -946,8 +1004,8 @@ fn failure_diagnostic(failure: GateFailure, desired: &DesiredSlice) -> Diagnosti
         .with_message(failure.message)
         .with_help(failure.excerpt)
         .with_severity(DiagnosticSeverity::Error);
-    if let Some(pin) = desired.components.get(&failure.consumer) {
-        diagnostic = diagnostic.with_component_id(pin.id.to_vec());
+    if let Some(pin) = desired.component_named(&failure.consumer) {
+        diagnostic = diagnostic.with_component_spec_hash(pin.spec_hash.to_vec());
     }
     diagnostic
 }
@@ -1176,7 +1234,15 @@ fn command_error(code: &str, action: &str, output: &Output) -> EngineError {
 mod tests {
     use std::os::unix::process::ExitStatusExt as _;
 
+    use iddqd::IdOrdMap;
+
     use super::*;
+    use crate::context::API_VERSION;
+    use crate::context::ComponentContext;
+    use crate::context::EnvironmentContext;
+    use crate::context::ImageContext;
+    use crate::context::SourceContext;
+    use crate::slice::ComponentPin;
 
     #[test]
     fn external_command_diagnostic_preserves_stderr_verbatim() {
@@ -1222,5 +1288,54 @@ mod tests {
                 .is_err()
         );
         assert!(parse_deploy_repository("https://github.com/other/deploy.git").is_err());
+    }
+
+    #[test]
+    fn generation_receipt_is_embedded_in_renderer_manifest() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(
+            temporary.path().join("manifest.json"),
+            br#"{"environment":"dev","components":{}}"#,
+        )
+        .unwrap();
+        let component = ComponentPin {
+            spec_hash: [3; 32],
+            name: "service-a".into(),
+            context: ComponentContext {
+                api_version: API_VERSION.into(),
+                environment: EnvironmentContext { id: "dev".into() },
+                source: SourceContext {
+                    repository: "henosis-playground/service-a".into(),
+                    revision: "a".repeat(40),
+                },
+                image: ImageContext {
+                    digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            },
+        };
+        let desired = DesiredSlice {
+            graph_id: [2; 16],
+            generation: 42,
+            sequence: 9,
+            environment: "dev".into(),
+            components: IdOrdMap::from_iter_unique([component]).unwrap(),
+            upstream_outputs: IdOrdMap::new(),
+        };
+
+        embed_generation_receipt(temporary.path(), &desired).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(temporary.path().join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["henosis"]["apiVersion"],
+            "henosis.dev/generation-receipt/v1"
+        );
+        assert_eq!(manifest["henosis"]["generation"], "42");
+        assert_eq!(
+            manifest["henosis"]["componentSpecHashes"][0],
+            hex::encode([3; 32])
+        );
+        assert_eq!(manifest["henosis"]["graphDigest"], desired.graph_digest());
+        assert!(manifest["henosis"].get("sequence").is_none());
     }
 }
