@@ -10,7 +10,7 @@ RUN cargo build --locked --release \
 FROM node:22.23.1-bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git util-linux \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable
 

@@ -171,6 +171,21 @@ impl Engine {
             .for_environment(environment)
     }
 
+    /// Build immutable browser evidence for one exact deploy revision.
+    pub fn publication_evidence(
+        &self,
+        revision: &str,
+    ) -> henosis_proto::proto::henosis::v1::PublicationEvidence {
+        henosis_proto::proto::henosis::v1::PublicationEvidence {
+            revision: Some(revision.to_owned()),
+            uri: Some(format!(
+                "https://github.com/{}/{}/commit/{revision}",
+                self.github.repository.owner, self.github.repository.name
+            )),
+            ..Default::default()
+        }
+    }
+
     /// Provision the real platform runner and render a complete world in
     /// isolation.
     pub async fn render(&self, desired: &DesiredSlice) -> Result<RenderedWorld, EngineError> {
@@ -853,6 +868,17 @@ struct GateReport {
 #[serde(rename_all = "camelCase")]
 struct GateFailure {
     consumer: String,
+    producer: String,
+    #[serde(default)]
+    pinned_sha: Option<String>,
+    #[serde(default)]
+    resolved_sha: Option<String>,
+    #[serde(default)]
+    outputs_schema_at_pinned: Option<serde_json::Value>,
+    #[serde(default)]
+    outputs_schema_at_resolved: Option<serde_json::Value>,
+    #[serde(default)]
+    consumed_paths: Vec<String>,
     kind: String,
     message: String,
     excerpt: String,
@@ -978,6 +1004,7 @@ fn render_command_error(output: &Output, desired: &DesiredSlice) -> EngineError 
 }
 
 fn failure_diagnostic(failure: GateFailure, desired: &DesiredSlice) -> Diagnostic {
+    let contract_failure = contract_failure_detail(&failure, desired);
     if let Some(issue) = failure
         .excerpt
         .lines()
@@ -997,17 +1024,67 @@ fn failure_diagnostic(failure: GateFailure, desired: &DesiredSlice) -> Diagnosti
         if let Some(help) = issue.help {
             diagnostic = diagnostic.with_help(help);
         }
+        diagnostic.contract_failure = buffa::MessageField::some(contract_failure);
         return diagnostic;
     }
     let mut diagnostic = Diagnostic::default()
         .with_code(format!("k8s.renderer.{}", failure.kind))
         .with_message(failure.message)
-        .with_help(failure.excerpt)
         .with_severity(DiagnosticSeverity::Error);
+    diagnostic.contract_failure = buffa::MessageField::some(contract_failure);
     if let Some(pin) = desired.component_named(&failure.consumer) {
         diagnostic = diagnostic.with_component_spec_hash(pin.spec_hash.to_vec());
     }
     diagnostic
+}
+
+fn contract_failure_detail(
+    failure: &GateFailure,
+    desired: &DesiredSlice,
+) -> henosis_proto::proto::henosis::v1::ContractFailureDetail {
+    use henosis_proto::proto::henosis::v1::ContractFailureKind;
+
+    let kind = match failure.kind.as_str() {
+        "compile" => ContractFailureKind::Compile,
+        "render" => ContractFailureKind::Render,
+        "validate" => ContractFailureKind::Validate,
+        "resolve" => ContractFailureKind::Resolve,
+        _ => ContractFailureKind::Render,
+    };
+    let source_url = desired
+        .component_named(&failure.consumer)
+        .zip(source_location(&failure.excerpt))
+        .map(|(pin, line)| {
+            format!(
+                "https://github.com/{}/blob/{}/henosis/src/index.ts#L{line}",
+                pin.context.source.repository, pin.context.source.revision
+            )
+        });
+    henosis_proto::proto::henosis::v1::ContractFailureDetail {
+        consumer: Some(failure.consumer.clone()),
+        producer: Some(failure.producer.clone()),
+        pinned_sha: failure.pinned_sha.clone(),
+        resolved_sha: failure.resolved_sha.clone(),
+        outputs_schema_at_pinned_json: failure
+            .outputs_schema_at_pinned
+            .as_ref()
+            .and_then(|schema| serde_json::to_vec(schema).ok()),
+        outputs_schema_at_resolved_json: failure
+            .outputs_schema_at_resolved
+            .as_ref()
+            .and_then(|schema| serde_json::to_vec(schema).ok()),
+        consumed_paths: failure.consumed_paths.clone(),
+        kind: Some(kind.into()),
+        excerpt: Some(failure.excerpt.clone()),
+        source_url,
+        ..Default::default()
+    }
+}
+
+fn source_location(excerpt: &str) -> Option<u64> {
+    let marker = "/henosis/src/index.ts(";
+    let (_, tail) = excerpt.split_once(marker)?;
+    tail.split_once(',')?.0.parse().ok()
 }
 
 async fn git<const N: usize>(
@@ -1337,5 +1414,73 @@ mod tests {
         );
         assert_eq!(manifest["henosis"]["graphDigest"], desired.graph_digest());
         assert!(manifest["henosis"].get("sequence").is_none());
+    }
+
+    #[test]
+    fn renderer_contract_failure_crosses_the_connector_losslessly() {
+        let component = ComponentPin {
+            spec_hash: [3; 32],
+            name: "service-b".into(),
+            context: ComponentContext {
+                api_version: API_VERSION.into(),
+                environment: EnvironmentContext { id: "dev".into() },
+                source: SourceContext {
+                    repository: "henosis-playground/service-b".into(),
+                    revision: "b".repeat(40),
+                },
+                image: ImageContext {
+                    digest: format!("sha256:{}", "c".repeat(64)),
+                },
+            },
+        };
+        let desired = DesiredSlice {
+            graph_id: [2; 16],
+            generation: 4,
+            sequence: 9,
+            environment: "dev".into(),
+            components: IdOrdMap::from_iter_unique([component]).unwrap(),
+            upstream_outputs: IdOrdMap::new(),
+        };
+        let failure = GateFailure {
+            consumer: "service-b".into(),
+            producer: "service-a".into(),
+            pinned_sha: Some("a".repeat(40)),
+            resolved_sha: Some("d".repeat(40)),
+            outputs_schema_at_pinned: Some(serde_json::json!({
+                "kind": "object",
+                "shape": {"api": {"kind": "url"}, "port": {"kind": "number"}}
+            })),
+            outputs_schema_at_resolved: Some(serde_json::json!({
+                "kind": "object",
+                "shape": {"port": {"kind": "string"}}
+            })),
+            consumed_paths: vec!["api".into(), "port".into()],
+            kind: "compile".into(),
+            message: "service-b consumes incompatible service-a outputs".into(),
+            excerpt: "service-b/henosis/src/index.ts(25,32): error TS2339".into(),
+        };
+
+        let diagnostic = failure_diagnostic(failure, &desired);
+        let detail = diagnostic.contract_failure.as_option().unwrap();
+        assert_eq!(detail.consumer.as_deref(), Some("service-b"));
+        assert_eq!(detail.producer.as_deref(), Some("service-a"));
+        assert_eq!(detail.consumed_paths, ["api", "port"]);
+        assert_eq!(detail.pinned_sha.as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(
+            detail.resolved_sha.as_deref(),
+            Some("d".repeat(40).as_str())
+        );
+        assert!(detail.outputs_schema_at_pinned_json.is_some());
+        assert!(detail.outputs_schema_at_resolved_json.is_some());
+        assert_eq!(
+            detail.source_url.as_deref(),
+            Some(
+                format!(
+                "https://github.com/henosis-playground/service-b/blob/{}/henosis/src/index.ts#L25",
+                "b".repeat(40)
+            )
+                .as_str()
+            )
+        );
     }
 }

@@ -4,8 +4,10 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::get;
 use connectrpc::Router;
-use connectrpc::Server;
 use henosis_k8s_reconciler::ConnectorHandler;
 use henosis_k8s_reconciler::engine::Engine;
 use henosis_k8s_reconciler::engine::EngineConfig;
@@ -50,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         publication_policies: publication_policies()?,
     })?;
     let core_uri = string_env("HENOSIS_CORE_URL", "http://core:8080").parse::<Uri>()?;
+    let core_url = core_uri.to_string();
     let core_token = env::var("HENOSIS_CORE_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
@@ -62,14 +65,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     reconciler.resume().await?;
 
     let handler = Arc::new(ConnectorHandler::new(reconciler));
-    let router = Router::new().add_service(handler);
+    let connect = Router::new().add_service(handler);
+    let health = HealthState {
+        client: reqwest::Client::new(),
+        core_url,
+    };
+    let router = axum::Router::new()
+        .route("/healthz", get(healthz))
+        .with_state(health)
+        .fallback_service(connect.into_axum_service());
     let bind = string_env("HENOSIS_BIND", "0.0.0.0:8081");
-    let server = Server::bind(bind).await?;
-    server
-        .serve_with_graceful_shutdown(router, async {
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await
+        .await?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct HealthState {
+    client: reqwest::Client,
+    core_url: String,
+}
+
+async fn healthz(State(state): State<HealthState>) -> StatusCode {
+    match state.client.get(&state.core_url).send().await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 fn string_env(name: &str, default: &str) -> String {

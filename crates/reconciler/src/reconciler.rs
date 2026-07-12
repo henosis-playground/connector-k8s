@@ -444,6 +444,7 @@ impl Reconciler {
                     previous.report.outputs.clone(),
                     Vec::new(),
                 );
+                let report = with_publication(report, previous.commit.as_deref(), &self.engine);
                 let published = PublishedState {
                     sequence: desired.sequence,
                     input_digest,
@@ -501,6 +502,7 @@ impl Reconciler {
                             pending.outputs.clone(),
                             Vec::new(),
                         );
+                        let report = with_publication(report, Some(&commit), &self.engine);
                         let published = PublishedState {
                             sequence: desired.sequence,
                             input_digest,
@@ -644,6 +646,7 @@ impl Reconciler {
                 outputs,
                 Vec::new(),
             );
+            let report = with_publication(report, commit.as_deref(), &self.engine);
             let published = PublishedState {
                 sequence: desired.sequence,
                 input_digest,
@@ -786,6 +789,17 @@ fn report_for(
         sequence: Some(desired.sequence),
         ..Default::default()
     }
+}
+
+fn with_publication(
+    mut report: SliceReport,
+    revision: Option<&str>,
+    engine: &Engine,
+) -> SliceReport {
+    report.publication = revision
+        .map(|revision| buffa::MessageField::some(engine.publication_evidence(revision)))
+        .unwrap_or_default();
+    report
 }
 
 fn awaiting_review_report(desired: &DesiredSlice, url: &str) -> SliceReport {
