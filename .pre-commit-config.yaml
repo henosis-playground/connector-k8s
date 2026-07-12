@@ -1,0 +1,47 @@
+default_install_hook_types: ["pre-commit", "pre-push", "commit-msg"]
+default_language_version:
+  # LINT.IfChange(msrv)
+  rust: "1.96.0"
+  # LINT.ThenChange(//Cargo.toml:msrv)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+  - repo: local
+    hooks:
+      - id: prefer-yaml-extension
+        name: Prefer .yaml over .yml
+        entry: >-
+          bash -ceu 'status=0; for path in "$@"; do case "$path" in *.yml) printf "use .yaml instead of .yml: %s\n" "$path" >&2; status=1 ;; esac; done; exit "$status"' --
+        language: system
+        files: \.yml$
+  - repo: https://github.com/crate-ci/typos
+    # LINT.IfChange(typos_version)
+    rev: v1.47.0
+    # LINT.ThenChange(//.github/workflows/spelling.yaml:typos_version)
+    hooks:
+      - id: typos
+  - repo: https://github.com/crate-ci/committed
+    # LINT.IfChange(committed_version)
+    rev: v1.1.11
+    # LINT.ThenChange(//.github/workflows/committed.yaml:committed_version)
+    hooks:
+      - id: committed
+  - repo: https://github.com/simonepri/ifttt-lint
+    # LINT.IfChange(ifttt_lint_version)
+    rev: v0.10.5
+    # LINT.ThenChange(//.github/workflows/ifttt-lint.yaml:ifttt_lint_version)
+    hooks:
+      - id: ifttt-lint
+      - id: ifttt-lint-diff
+        stages: [pre-push]
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.25.2
+    hooks:
+      - id: zizmor

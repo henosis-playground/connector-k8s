@@ -1,0 +1,159 @@
+{
+  extends: ["helpers:pinGitHubActionDigests"],
+  schedule: [
+    'before 5am on the first day of the month',
+  ],
+  minimumReleaseAge: '3 days',
+  minimumReleaseAgeBehaviour: 'timestamp-required',
+  internalChecksFilter: 'strict',
+  semanticCommits: 'enabled',
+  commitMessageLowerCase: 'never',
+  configMigration: true,
+  dependencyDashboard: true,
+  "pre-commit": {
+    enabled: true
+  },
+  customManagers: [
+    {
+      customType: 'regex',
+      managerFilePatterns: [
+        '/^Cargo\\.toml$/',
+        '/^\\.pre-commit-config\\.yaml$/',
+        '/^\\.github/workflows/(audit|ci|pre-commit)\\.yaml$/',
+      ],
+      matchStrings: [
+        'rust-version\\s*=\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
+        'RUSTUP_TOOLCHAIN:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
+        'rust:\\s*"(?<currentValue>\\d+\\.\\d+\\.\\d+)"',
+      ],
+      depNameTemplate: 'rust-msrv',
+      packageNameTemplate: 'rust',
+      datasourceTemplate: 'rust-version',
+      versioningTemplate: 'rust-release-channel',
+    },
+    {
+      customType: 'regex',
+      managerFilePatterns: [
+        '/^\\.github/workflows/pre-commit\\.yaml$/',
+      ],
+      matchStrings: [
+        'prek-version.*?(?<currentValue>\\d+\\.\\d+(\\.\\d+)?)',
+      ],
+      depNameTemplate: 'prek',
+      packageNameTemplate: 'j178/prek',
+      datasourceTemplate: 'github-releases',
+    },
+  ],
+  packageRules: [
+    {
+      // Nightlies release daily; a weekly bump keeps the pinned toolchain
+      // ahead of the latest beta without the churn (and breakage risk) of
+      // tracking every nightly.
+      commitMessageTopic: 'Rust toolchain',
+      matchManagers: [
+        'rust-toolchain',
+      ],
+      matchDepTypes: [
+        'toolchain',
+      ],
+      schedule: [
+        'before 5am on Monday',
+      ],
+      minimumReleaseAge: null,
+      automerge: true,
+    },
+    {
+      commitMessageTopic: 'Rust MSRV',
+      matchManagers: [
+        'custom.regex',
+      ],
+      matchDepNames: [
+        'rust-msrv',
+      ],
+      allowedVersions: '/^\\d+\\.\\d+\\.\\d+$/',
+      schedule: [
+        '* * * * *',
+      ],
+      minimumReleaseAge: null,
+      automerge: true,
+    },
+    {
+      commitMessageTopic: 'Prek',
+      matchManagers: [
+        'custom.regex',
+      ],
+      matchDepNames: [
+        'prek',
+      ],
+      extractVersion: '^v(?<version>\\d+\\.\\d+\\.\\d+)',
+      schedule: [
+        '* * * * *',
+      ],
+      automerge: true,
+    },
+    // Goals:
+    // - Keep version reqs low, ignoring compatible normal/build dependencies
+    // - Take advantage of latest dev-dependencies
+    // - Rollup safe upgrades to reduce CI runner load
+    // - Help keep number of versions down by always using latest breaking change
+    // - Have lockfile and manifest in-sync
+    {
+      matchManagers: [
+        'cargo',
+      ],
+      matchDepTypes: [
+        'build-dependencies',
+        'dependencies',
+      ],
+      matchCurrentVersion: '>=0.1.0',
+      matchUpdateTypes: [
+        'patch',
+      ],
+      enabled: false,
+    },
+    {
+      matchManagers: [
+        'cargo',
+      ],
+      matchDepTypes: [
+        'build-dependencies',
+        'dependencies',
+      ],
+      matchCurrentVersion: '>=1.0.0',
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+      ],
+      enabled: false,
+    },
+    {
+      matchManagers: [
+        'cargo',
+      ],
+      matchDepTypes: [
+        'dev-dependencies',
+      ],
+      matchCurrentVersion: '>=0.1.0',
+      matchUpdateTypes: [
+        'patch',
+      ],
+      automerge: true,
+      groupName: 'compatible (dev)',
+    },
+    {
+      matchManagers: [
+        'cargo',
+      ],
+      matchDepTypes: [
+        'dev-dependencies',
+      ],
+      matchCurrentVersion: '>=1.0.0',
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+      ],
+      automerge: true,
+      groupName: 'compatible (dev)',
+    },
+  ],
+}

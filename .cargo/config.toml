@@ -1,0 +1,5 @@
+[cargo-new]
+vcs = "none"
+
+[resolver]
+incompatible-rust-versions = "fallback"

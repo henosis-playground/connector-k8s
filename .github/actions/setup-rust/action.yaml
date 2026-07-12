@@ -1,0 +1,44 @@
+name: Setup Rust
+description: Install a Rust toolchain, initialize the cache, and optionally install cargo tools.
+inputs:
+  components:
+    description: Comma-separated Rust components to install.
+    required: false
+    default: ""
+  cargo-hack:
+    description: Whether to install cargo-hack.
+    required: false
+    default: "false"
+  cargo-nextest:
+    description: Whether to install cargo-nextest.
+    required: false
+    default: "false"
+  cargo-llvm-cov:
+    description: Whether to install cargo-llvm-cov.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      with:
+        toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+        components: ${{ inputs.components }}
+    - name: Initialize cache
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+    - name: Install cargo-hack
+      if: ${{ inputs['cargo-hack'] == 'true' }}
+      uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
+      with:
+        tool: cargo-hack
+    - name: Install cargo-nextest
+      if: ${{ inputs['cargo-nextest'] == 'true' }}
+      uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
+      with:
+        tool: cargo-nextest
+    - name: Install cargo-llvm-cov
+      if: ${{ inputs['cargo-llvm-cov'] == 'true' }}
+      uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
+      with:
+        tool: cargo-llvm-cov

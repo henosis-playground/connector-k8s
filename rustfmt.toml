@@ -1,0 +1,12 @@
+unstable_features = true
+
+imports_granularity = "Item"
+reorder_imports = true
+reorder_modules = true
+reorder_impl_items = true
+format_macro_matchers = true
+format_strings = true
+normalize_doc_attributes = true
+format_macro_bodies = true
+wrap_comments = true
+format_code_in_doc_comments = true

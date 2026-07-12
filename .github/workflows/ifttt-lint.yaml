@@ -1,0 +1,25 @@
+# Not run through pre-commit checks because they don't handle sending the correct commit
+# range to `ifttt-lint`; the action validates co-changes across the PR's commits.
+name: ifttt-lint
+permissions:
+  contents: read
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+jobs:
+  ifttt-lint:
+    name: ifttt-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Run ifttt-lint
+        # LINT.IfChange(ifttt_lint_version)
+        uses: simonepri/ifttt-lint@bfaec4d0ba560f41794b7b71597f575bbd2a0438 # v0.10.5
+        # LINT.ThenChange(//.pre-commit-config.yaml:ifttt_lint_version)
