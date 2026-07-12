@@ -1,20 +1,21 @@
 [package]
-name = "henosis-connector-k8s-server"
+name = "henosis-k8s-contract-harness"
 version = "0.0.0"
-description = "Service process for the Henosis Kubernetes reconciler"
+description = "Contract-faithful live proof harness for the Kubernetes connector"
 repository.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+buffa.workspace = true
 connectrpc.workspace = true
 henosis-k8s-reconciler.workspace = true
 henosis-proto.workspace = true
 http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
 workspace-hack = { version = "0.0.0", path = "../../crates/workspace-hack" }
 
 [lints]

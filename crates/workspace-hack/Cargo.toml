@@ -8,6 +8,9 @@ publish.workspace = true
 description = "workspace-hack package, managed by hakari"
 
 ### BEGIN HAKARI SECTION
+[dependencies]
+tracing-core = { version = "0.1" }
+
 ### END HAKARI SECTION
 
 [lints]

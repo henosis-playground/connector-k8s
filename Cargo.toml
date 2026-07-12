@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/*"]
+members = ["crates/*", "services/*", "tests/*"]
 
 [workspace.package]
 repository = "https://github.com/henosis-playground/connector-k8s"
@@ -16,8 +16,30 @@ rust-version = "1.96.0"
 publish = false
 
 [workspace.dependencies]
-connectrpc = { version = "0.8.1", features = ["client"] }
+buffa = "0.8.1"
+connectrpc = { version = "0.8.1", features = ["client", "server"] }
 faultline = "0.1.0"
+hex = "0.4.3"
+http = "1.3.1"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tempfile = "3.20.0"
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = [
+  "fs",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+toml = "0.9.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+uuid = { version = "1.17.0", features = ["v5", "v7"] }
+
+henosis-proto = { git = "https://github.com/henosis-playground/core.git", branch = "proto-draft" }
 
 henosis-k8s-reconciler = { path = "crates/reconciler" }
 

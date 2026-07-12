@@ -2,8 +2,29 @@
 
 The Henosis Kubernetes reconciler.
 
-This workspace is intentionally limited to the reconciler library and its service process while
-the core ConnectRPC API remains under review.
+The service implements the generated `henosis.v1.ConnectorService` contract. It durably accepts
+complete graph slices, provisions the real platform renderer through the D24 `prepare-runner.sh`
+recipe, renders and validates the whole Kubernetes world, atomically publishes the result to the
+deploy repository's `env/<environment>` branch, and reports one complete observation to core.
+
+The connector-owned bytes that authoring and collector integrations place in
+`Component.context` are specified in [docs/component-context-v1.md](docs/component-context-v1.md).
+The format is strict and versioned; it carries the environment identity, source repository and
+immutable revision, and image digest needed by the current renderer.
+
+## Service configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HENOSIS_BIND` | `0.0.0.0:8081` | ConnectRPC listen address |
+| `HENOSIS_CORE_URL` | `http://core:8080` | Core callback service origin |
+| `HENOSIS_STATE_DIR` | `/var/lib/henosis-connector-k8s/state` | Durable accepted levels and publication checkpoints |
+| `HENOSIS_PREPARE_RUNNER` | `/opt/henosis/platform/scripts/prepare-runner.sh` | Platform D24 recipe |
+| `HENOSIS_PLATFORM_REF` | `origin/main` | Platform ref resolved to an immutable SHA per invocation |
+| `HENOSIS_PLATFORM_CHECKOUT` | `/var/lib/henosis-connector-k8s/platform` | Recipe-managed platform checkout |
+| `HENOSIS_RUNNER_CACHE_DIR` | `/var/lib/henosis-connector-k8s/runner-cache` | Recipe-managed SHA cache |
+| `HENOSIS_DEPLOY_REMOTE` | `https://github.com/henosis-playground/deploy.git` | Desired-state repository; other GitHub orgs are rejected |
+| `HENOSIS_GITHUB_TOKEN_FILE` | `/run/secrets/github-pat` | PAT file read by Git askpass |
 
 ## Layout
 
