@@ -165,7 +165,7 @@ fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn tree_digest(root: &Path) -> io::Result<String> {
+pub(crate) fn tree_digest(root: &Path) -> io::Result<String> {
     let mut entries = Vec::new();
     collect_entries(root, root, &mut entries)?;
     entries.sort();

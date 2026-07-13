@@ -2,33 +2,22 @@
 
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::get;
-use connectrpc::Router;
-use henosis_k8s_reconciler::ConnectorHandler;
+use connector_sdk::RuntimeConfig;
+use connector_sdk::ServeConfig;
+use henosis_k8s_reconciler::ConnectorConfig;
+use henosis_k8s_reconciler::KubernetesConnector;
 use henosis_k8s_reconciler::engine::Engine;
 use henosis_k8s_reconciler::engine::EngineConfig;
 use henosis_k8s_reconciler::engine::PublicationPolicies;
-use henosis_k8s_reconciler::reconciler::CoreReporter;
-use henosis_k8s_reconciler::reconciler::Reconciler;
-use henosis_k8s_reconciler::reconciler::ReconcilerConfig;
 use http::Uri;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("henosis=info")),
-        )
-        .with_span_events(FmtSpan::CLOSE)
-        .try_init()?;
-
-    let state_dir = path_env("HENOSIS_STATE_DIR", "/var/lib/henosis-connector-k8s/state");
+    let state_dir = path_env(
+        "HENOSIS_STATE_DIR",
+        "/var/lib/henosis-connector-k8s/state-sdk-v1",
+    );
     let engine = Engine::new(EngineConfig {
         prepare_runner: path_env(
             "HENOSIS_PREPARE_RUNNER",
@@ -52,50 +41,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         render_cache_max_entries: usize_env("HENOSIS_RENDER_CACHE_MAX_ENTRIES", 64)?,
         publication_policies: publication_policies()?,
     })?;
-    let core_uri = string_env("HENOSIS_CORE_URL", "http://core:8080").parse::<Uri>()?;
-    let core_url = core_uri.to_string();
+    let connector = KubernetesConnector::new(
+        ConnectorConfig {
+            target_state_dir: state_dir.join("target-v1"),
+        },
+        engine,
+    )?;
     let core_token = env::var("HENOSIS_CORE_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
-    let reporter = Arc::new(CoreReporter::new(core_uri, core_token));
-    let reconciler = Arc::new(Reconciler::new(
-        ReconcilerConfig { state_dir },
-        engine,
-        reporter,
-    )?);
-    reconciler.resume().await?;
-
-    let handler = Arc::new(ConnectorHandler::new(reconciler));
-    let connect = Router::new().add_service(handler);
-    let health = HealthState {
-        client: reqwest::Client::new(),
-        core_url,
-    };
-    let router = axum::Router::new()
-        .route("/healthz", get(healthz))
-        .with_state(health)
-        .fallback_service(connect.into_axum_service());
-    let bind = string_env("HENOSIS_BIND", "0.0.0.0:8081");
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    connector_sdk::serve(
+        ServeConfig {
+            bind: string_env("HENOSIS_BIND", "0.0.0.0:8081"),
+            core_uri: string_env("HENOSIS_CORE_URL", "http://core:8080").parse::<Uri>()?,
+            core_token,
+            runtime: RuntimeConfig::new(state_dir),
+            telemetry_filter: "henosis=info,connector_sdk=info".into(),
+        },
+        connector,
+    )
+    .await?;
     Ok(())
-}
-
-#[derive(Clone)]
-struct HealthState {
-    client: reqwest::Client,
-    core_url: String,
-}
-
-async fn healthz(State(state): State<HealthState>) -> StatusCode {
-    match state.client.get(&state.core_url).send().await {
-        Ok(_) => StatusCode::OK,
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-    }
 }
 
 fn string_env(name: &str, default: &str) -> String {
