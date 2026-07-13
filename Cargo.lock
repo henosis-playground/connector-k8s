@@ -266,7 +266,7 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 [[package]]
 name = "connector-sdk"
 version = "0.1.0"
-source = "git+https://github.com/henosis-playground/connector-sdk.git?branch=feat%2Faudit-consumption#add6f817caf77afdcd796a5df61c7adaa1b78a56"
+source = "git+https://github.com/henosis-playground/connector-sdk.git?rev=74d301620a5f4a57e2a5f696e37c716b62ec5d8d#74d301620a5f4a57e2a5f696e37c716b62ec5d8d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -286,13 +286,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "workspace-hack 0.0.0 (git+https://github.com/henosis-playground/connector-sdk.git?branch=feat%2Faudit-consumption)",
+ "workspace-hack 0.0.0 (git+https://github.com/henosis-playground/connector-sdk.git?rev=74d301620a5f4a57e2a5f696e37c716b62ec5d8d)",
 ]
 
 [[package]]
 name = "connector-sdk-conformance"
 version = "0.1.0"
-source = "git+https://github.com/henosis-playground/connector-sdk.git?branch=feat%2Faudit-consumption#add6f817caf77afdcd796a5df61c7adaa1b78a56"
+source = "git+https://github.com/henosis-playground/connector-sdk.git?rev=74d301620a5f4a57e2a5f696e37c716b62ec5d8d#74d301620a5f4a57e2a5f696e37c716b62ec5d8d"
 dependencies = [
  "async-trait",
  "blake3",
@@ -302,7 +302,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "workspace-hack 0.0.0 (git+https://github.com/henosis-playground/connector-sdk.git?branch=feat%2Faudit-consumption)",
+ "workspace-hack 0.0.0 (git+https://github.com/henosis-playground/connector-sdk.git?rev=74d301620a5f4a57e2a5f696e37c716b62ec5d8d)",
 ]
 
 [[package]]
@@ -2392,7 +2392,7 @@ version = "0.0.0"
 [[package]]
 name = "workspace-hack"
 version = "0.0.0"
-source = "git+https://github.com/henosis-playground/connector-sdk.git?branch=feat%2Faudit-consumption#add6f817caf77afdcd796a5df61c7adaa1b78a56"
+source = "git+https://github.com/henosis-playground/connector-sdk.git?rev=74d301620a5f4a57e2a5f696e37c716b62ec5d8d#74d301620a5f4a57e2a5f696e37c716b62ec5d8d"
 dependencies = [
  "serde_core",
 ]
