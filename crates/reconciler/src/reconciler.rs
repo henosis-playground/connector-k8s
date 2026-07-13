@@ -417,6 +417,11 @@ impl Reconciler {
             soter.henosis.reconcile.outcome = tracing::field::Empty,
             soter.henosis.publication.commit = tracing::field::Empty,
             soter.henosis.proposal.number = tracing::field::Empty,
+            soter.henosis.render.cache_status = tracing::field::Empty,
+            soter.henosis.render.cache_reason = tracing::field::Empty,
+            soter.henosis.render.recipe = tracing::field::Empty,
+            soter.henosis.render.platform_sha = tracing::field::Empty,
+            soter.henosis.render.cache_evicted_count = tracing::field::Empty,
         );
         async {
             if let Some(published) = &state.published
@@ -594,40 +599,51 @@ impl Reconciler {
                 }
             } else {
                 match self.engine.render(&desired).await {
-                    Ok(world) if policy == PublicationPolicy::Direct => self
-                        .engine
-                        .publish(&desired, &world)
-                        .await
-                        .map(|commit| (world.outputs, Some(commit))),
-                    Ok(world) => match self.engine.propose(&desired, &world).await {
-                        Ok(ProposalPublication::Unchanged(commit)) => {
-                            Ok((world.outputs, Some(commit)))
+                    Ok(world) => {
+                        world.record_cache_telemetry();
+                        if policy == PublicationPolicy::Direct {
+                            self.engine
+                                .publish(&desired, &world)
+                                .await
+                                .map(|commit| (world.outputs, Some(commit)))
+                        } else {
+                            match self.engine.propose(&desired, &world).await {
+                                Ok(ProposalPublication::Unchanged(commit)) => {
+                                    Ok((world.outputs, Some(commit)))
+                                }
+                                Ok(ProposalPublication::Awaiting(proposal)) => {
+                                    let report = awaiting_review_report(&desired, &proposal.url);
+                                    let pending = PendingProposalState {
+                                        sequence: desired.sequence,
+                                        input_digest,
+                                        request_id: new_request_id(),
+                                        report,
+                                        outputs: world.outputs,
+                                        proposal,
+                                    };
+                                    Span::current().record(
+                                        crate::telemetry::PROPOSAL_NUMBER,
+                                        pending.proposal.number.to_string(),
+                                    );
+                                    state.proposal = Some(pending.clone());
+                                    self.save(graph_id, &state)?;
+                                    self.schedule_reconcile(graph_id, desired.sequence);
+                                    self.report_snapshot(
+                                        &pending.request_id,
+                                        None,
+                                        &pending.report,
+                                    )
+                                    .await?;
+                                    Span::current().record(
+                                        crate::telemetry::RECONCILE_OUTCOME,
+                                        "awaiting_review",
+                                    );
+                                    return Ok(());
+                                }
+                                Err(error) => Err(error),
+                            }
                         }
-                        Ok(ProposalPublication::Awaiting(proposal)) => {
-                            let report = awaiting_review_report(&desired, &proposal.url);
-                            let pending = PendingProposalState {
-                                sequence: desired.sequence,
-                                input_digest,
-                                request_id: new_request_id(),
-                                report,
-                                outputs: world.outputs,
-                                proposal,
-                            };
-                            Span::current().record(
-                                crate::telemetry::PROPOSAL_NUMBER,
-                                pending.proposal.number.to_string(),
-                            );
-                            state.proposal = Some(pending.clone());
-                            self.save(graph_id, &state)?;
-                            self.schedule_reconcile(graph_id, desired.sequence);
-                            self.report_snapshot(&pending.request_id, None, &pending.report)
-                                .await?;
-                            Span::current()
-                                .record(crate::telemetry::RECONCILE_OUTCOME, "awaiting_review");
-                            return Ok(());
-                        }
-                        Err(error) => Err(error),
-                    },
+                    }
                     Err(error) => Err(error),
                 }
             };

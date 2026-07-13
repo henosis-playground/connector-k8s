@@ -21,6 +21,10 @@ Per-environment direct and pull-request-gated publication, including the reusabl
 review projection, are specified in
 [docs/review-projection-v1.md](docs/review-projection-v1.md).
 
+Successful deterministic renderer results are memoized locally by the complete semantic recipe
+described in [docs/render-cache-v1.md](docs/render-cache-v1.md). Publication, generation receipts,
+and core reporting always execute live.
+
 ## Service configuration
 
 | Variable | Default | Purpose |
@@ -33,6 +37,7 @@ review projection, are specified in
 | `HENOSIS_PLATFORM_REF` | `origin/main` | Platform ref resolved to an immutable SHA per invocation |
 | `HENOSIS_PLATFORM_CHECKOUT` | `/var/lib/henosis-connector-k8s/platform` | Recipe-managed platform checkout |
 | `HENOSIS_RUNNER_CACHE_DIR` | `/var/lib/henosis-connector-k8s/runner-cache` | Recipe-managed SHA cache |
+| `HENOSIS_RENDER_CACHE_MAX_ENTRIES` | `64` | Maximum successful semantic render recipes retained locally; `0` disables memoization |
 | `HENOSIS_DEPLOY_REMOTE` | `https://github.com/henosis-playground/deploy.git` | Desired-state repository; other GitHub orgs are rejected |
 | `HENOSIS_GITHUB_TOKEN_FILE` | `/run/secrets/github-pat` | PAT file read by Git askpass |
 | `HENOSIS_PUBLICATION_POLICIES` | `{"default":"direct","environments":{}}` | Strict JSON default and per-environment `direct`/`pr-gated` policies |

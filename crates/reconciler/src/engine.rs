@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -18,7 +19,10 @@ use serde::Serialize;
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::process::Command;
+use tracing::Span;
 
+use crate::render_cache::CacheLookup;
+use crate::render_cache::RenderCache;
 use crate::review::ReviewProjection;
 use crate::slice::DesiredSlice;
 
@@ -76,6 +80,9 @@ pub struct EngineConfig {
     pub github_token_file: PathBuf,
     /// Root for isolated render and publication staging.
     pub scratch_root: PathBuf,
+    /// Maximum successful deterministic render recipes retained locally.
+    /// Zero disables memoization.
+    pub render_cache_max_entries: usize,
     /// Default and per-environment publication policies.
     pub publication_policies: PublicationPolicies,
 }
@@ -89,6 +96,37 @@ pub struct RenderedWorld {
     pub output_dir: PathBuf,
     /// Complete deterministic component outputs.
     pub outputs: Vec<ComponentOutputs>,
+    cache: RenderCacheObservation,
+}
+
+#[derive(Debug)]
+struct RenderCacheObservation {
+    status: &'static str,
+    reason: Option<&'static str>,
+    recipe: String,
+    platform_sha: String,
+    evicted: usize,
+}
+
+impl RenderedWorld {
+    /// Attach deterministic-render cache facts to the enclosing reconcile
+    /// wide event after rendering succeeds.
+    pub fn record_cache_telemetry(&self) {
+        let span = Span::current();
+        span.record(crate::telemetry::RENDER_CACHE_STATUS, self.cache.status);
+        span.record(crate::telemetry::RENDER_RECIPE, self.cache.recipe.as_str());
+        span.record(
+            crate::telemetry::RENDER_PLATFORM_SHA,
+            self.cache.platform_sha.as_str(),
+        );
+        span.record(
+            crate::telemetry::RENDER_CACHE_EVICTED_COUNT,
+            self.cache.evicted,
+        );
+        if let Some(reason) = self.cache.reason {
+            span.record(crate::telemetry::RENDER_CACHE_REASON, reason);
+        }
+    }
 }
 
 /// Durable coordinates for one open GitHub review proposal.
@@ -146,6 +184,15 @@ impl EngineError {
 pub struct Engine {
     config: EngineConfig,
     github: GitHubApi,
+    render_cache: RenderCache,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedRunner {
+    entrypoint: PathBuf,
+    platform_sha: String,
+    prepare_recipe_digest: [u8; 32],
+    entrypoint_digest: [u8; 32],
 }
 
 impl Engine {
@@ -161,7 +208,15 @@ impl Engine {
             repository,
             token_file: config.github_token_file.clone(),
         };
-        Ok(Self { config, github })
+        let render_cache = RenderCache::new(
+            config.scratch_root.join("render-cache-v1"),
+            config.render_cache_max_entries,
+        );
+        Ok(Self {
+            config,
+            github,
+            render_cache,
+        })
     }
 
     /// Resolve the connector policy for one validated environment.
@@ -189,6 +244,12 @@ impl Engine {
     /// Provision the real platform runner and render a complete world in
     /// isolation.
     pub async fn render(&self, desired: &DesiredSlice) -> Result<RenderedWorld, EngineError> {
+        let desired_manifest = desired
+            .manifest_toml(&desired.environment)
+            .map_err(|error| simple_error("k8s.context.invalid", &error.to_string()))?;
+        let dev_manifest = desired
+            .manifest_toml("dev")
+            .map_err(|error| simple_error("k8s.context.invalid", &error.to_string()))?;
         fs::create_dir_all(&self.config.scratch_root).map_err(|error| {
             io_error(
                 "k8s.renderer.scratch",
@@ -204,21 +265,97 @@ impl Engine {
         let output_dir = temporary.path().join("rendered");
         fs::create_dir_all(&manifest_dir)
             .map_err(|error| io_error("k8s.renderer.manifest", "create manifest staging", error))?;
-        fs::write(
-            manifest_dir.join("desired.toml"),
-            desired
-                .manifest_toml(&desired.environment)
-                .map_err(|error| simple_error("k8s.context.invalid", &error.to_string()))?,
-        )
-        .map_err(|error| io_error("k8s.renderer.manifest", "write desired manifest", error))?;
-        fs::write(
-            manifest_dir.join("dev.toml"),
-            desired
-                .manifest_toml("dev")
-                .map_err(|error| simple_error("k8s.context.invalid", &error.to_string()))?,
-        )
-        .map_err(|error| io_error("k8s.renderer.manifest", "write dev manifest", error))?;
+        fs::write(manifest_dir.join("desired.toml"), &desired_manifest)
+            .map_err(|error| io_error("k8s.renderer.manifest", "write desired manifest", error))?;
+        fs::write(manifest_dir.join("dev.toml"), &dev_manifest)
+            .map_err(|error| io_error("k8s.renderer.manifest", "write dev manifest", error))?;
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| io_error("k8s.renderer.scratch", "create render output", error))?;
 
+        let runner = self.prepare_runner().await?;
+        let recipe = render_recipe_key(desired, &desired_manifest, &dev_manifest, &runner);
+        let mut cache_status = "miss";
+        let mut cache_reason = None;
+        let mut evicted = 0;
+        if self.render_cache.enabled() {
+            match self.render_cache.restore(&recipe, &output_dir) {
+                Ok(CacheLookup::Hit) => {
+                    match read_render_outputs(&output_dir, desired).and_then(|outputs| {
+                        validate_generation_receipt_slot(&output_dir).map(|()| outputs)
+                    }) {
+                        Ok(outputs) => {
+                            embed_generation_receipt(&output_dir, desired)?;
+                            return Ok(RenderedWorld {
+                                _temporary: temporary,
+                                output_dir,
+                                outputs,
+                                cache: RenderCacheObservation {
+                                    status: "hit",
+                                    reason: None,
+                                    recipe,
+                                    platform_sha: runner.platform_sha,
+                                    evicted,
+                                },
+                            });
+                        }
+                        Err(_) => {
+                            let _ = self.render_cache.invalidate(&recipe);
+                            reset_render_output(&output_dir)?;
+                            cache_reason = Some("invalid_entry");
+                        }
+                    }
+                }
+                Ok(CacheLookup::Miss) => {}
+                Err(_) => {
+                    let _ = self.render_cache.invalidate(&recipe);
+                    reset_render_output(&output_dir)?;
+                    cache_reason = Some("read_failed");
+                }
+            }
+        } else {
+            cache_status = "uncacheable";
+            cache_reason = Some("disabled");
+        }
+
+        let rendered = Command::new(&runner.entrypoint)
+            .arg("render")
+            .arg(manifest_dir.join("desired.toml"))
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .env("GITHUB_ACTIONS", "true")
+            .output()
+            .await
+            .map_err(|error| io_error("k8s.renderer.execute", "start platform renderer", error))?;
+        if !rendered.status.success() {
+            return Err(render_command_error(&rendered, desired));
+        }
+        let outputs = read_render_outputs(&output_dir, desired)?;
+        validate_generation_receipt_slot(&output_dir)?;
+        if self.render_cache.enabled() {
+            match self.render_cache.store(&recipe, &output_dir) {
+                Ok(stored) => evicted = stored.evicted,
+                Err(_) => {
+                    cache_status = "uncacheable";
+                    cache_reason = Some("write_failed");
+                }
+            }
+        }
+        embed_generation_receipt(&output_dir, desired)?;
+        Ok(RenderedWorld {
+            _temporary: temporary,
+            output_dir,
+            outputs,
+            cache: RenderCacheObservation {
+                status: cache_status,
+                reason: cache_reason,
+                recipe,
+                platform_sha: runner.platform_sha,
+                evicted,
+            },
+        })
+    }
+
+    async fn prepare_runner(&self) -> Result<PreparedRunner, EngineError> {
         let prepared = Command::new(&self.config.prepare_runner)
             .arg(&self.config.platform_ref)
             .env("HENOSIS_PLATFORM_CHECKOUT", &self.config.platform_checkout)
@@ -235,31 +372,44 @@ impl Engine {
         }
         let entrypoint = String::from_utf8(prepared.stdout)
             .map_err(|error| simple_error("k8s.runner.prepare", &error.to_string()))?;
-        let entrypoint = entrypoint.trim();
-        if entrypoint.is_empty() {
+        let entrypoint = PathBuf::from(entrypoint.trim());
+        if entrypoint.as_os_str().is_empty() {
             return Err(simple_error(
                 "k8s.runner.prepare",
                 "prepare-runner returned an empty entrypoint",
             ));
         }
-        let rendered = Command::new(entrypoint)
-            .arg("render")
-            .arg(manifest_dir.join("desired.toml"))
-            .arg("--output-dir")
-            .arg(&output_dir)
-            .env("GITHUB_ACTIONS", "true")
-            .output()
-            .await
-            .map_err(|error| io_error("k8s.renderer.execute", "start platform renderer", error))?;
-        if !rendered.status.success() {
-            return Err(render_command_error(&rendered, desired));
+        let runner_root = entrypoint.parent().ok_or_else(|| {
+            simple_error(
+                "k8s.runner.prepare",
+                "prepare-runner returned an entrypoint without a parent directory",
+            )
+        })?;
+        let platform_sha =
+            fs::read_to_string(runner_root.join(".henosis-platform-sha")).map_err(|error| {
+                io_error(
+                    "k8s.runner.identity",
+                    "read prepared platform identity",
+                    error,
+                )
+            })?;
+        let platform_sha = platform_sha.trim().to_owned();
+        if !is_commit_sha(&platform_sha) {
+            return Err(simple_error(
+                "k8s.runner.identity",
+                "prepared platform identity is not a full lowercase Git commit SHA",
+            ));
         }
-        let outputs = read_render_outputs(&output_dir, desired)?;
-        embed_generation_receipt(&output_dir, desired)?;
-        Ok(RenderedWorld {
-            _temporary: temporary,
-            output_dir,
-            outputs,
+        let prepare_recipe = fs::read(&self.config.prepare_runner).map_err(|error| {
+            io_error("k8s.runner.identity", "read prepare-runner recipe", error)
+        })?;
+        let entrypoint_bytes = fs::read(&entrypoint)
+            .map_err(|error| io_error("k8s.runner.identity", "read runner entrypoint", error))?;
+        Ok(PreparedRunner {
+            entrypoint,
+            platform_sha,
+            prepare_recipe_digest: *blake3::hash(&prepare_recipe).as_bytes(),
+            entrypoint_digest: *blake3::hash(&entrypoint_bytes).as_bytes(),
         })
     }
 
@@ -900,6 +1050,71 @@ struct RecordLocation {
     path: String,
 }
 
+fn render_recipe_key(
+    desired: &DesiredSlice,
+    desired_manifest: &str,
+    dev_manifest: &str,
+    runner: &PreparedRunner,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"henosis.dev/k8s-render-action/v1\0");
+    hash_framed(&mut hasher, runner.platform_sha.as_bytes());
+    hasher.update(&runner.prepare_recipe_digest);
+    hasher.update(&runner.entrypoint_digest);
+    hasher.update(&ambient_environment_digest());
+    hash_framed(&mut hasher, desired.environment.as_bytes());
+    hash_framed(&mut hasher, desired_manifest.as_bytes());
+    hash_framed(&mut hasher, dev_manifest.as_bytes());
+    hasher.update(b"render\0GITHUB_ACTIONS=true\0");
+    for component in desired.components.iter() {
+        hasher.update(&component.spec_hash);
+    }
+    for output in desired.upstream_outputs.iter() {
+        hasher.update(&output.component_spec_hash);
+        hash_framed(&mut hasher, &output.values_json);
+    }
+    hex::encode(hasher.finalize().as_bytes())
+}
+
+fn hash_framed(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn ambient_environment_digest() -> [u8; 32] {
+    let mut environment = std::env::vars_os()
+        .filter(|(name, _)| name != "GITHUB_ACTIONS")
+        .collect::<Vec<_>>();
+    environment.sort();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"henosis.dev/k8s-render-environment/v1\0");
+    for (name, value) in environment {
+        hash_framed(&mut hasher, name.as_os_str().as_bytes());
+        hash_framed(&mut hasher, value.as_os_str().as_bytes());
+    }
+    hasher.update(b"GITHUB_ACTIONS=true\0");
+    *hasher.finalize().as_bytes()
+}
+
+fn is_commit_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn reset_render_output(output_dir: &Path) -> Result<(), EngineError> {
+    if output_dir
+        .try_exists()
+        .map_err(|error| io_error("k8s.renderer.scratch", "inspect render output", error))?
+    {
+        fs::remove_dir_all(output_dir)
+            .map_err(|error| io_error("k8s.renderer.scratch", "clear render output", error))?;
+    }
+    fs::create_dir_all(output_dir)
+        .map_err(|error| io_error("k8s.renderer.scratch", "recreate render output", error))
+}
+
 fn read_render_outputs(
     output_dir: &Path,
     desired: &DesiredSlice,
@@ -981,6 +1196,26 @@ fn embed_generation_receipt(output_dir: &Path, desired: &DesiredSlice) -> Result
         .map_err(|error| simple_error("k8s.publisher.receipt", &error.to_string()))?;
     fs::write(path, bytes)
         .map_err(|error| io_error("k8s.publisher.receipt", "write generation receipt", error))
+}
+
+fn validate_generation_receipt_slot(output_dir: &Path) -> Result<(), EngineError> {
+    let bytes = fs::read(output_dir.join("manifest.json"))
+        .map_err(|error| io_error("k8s.publisher.receipt", "read renderer manifest", error))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| simple_error("k8s.publisher.receipt", &error.to_string()))?;
+    let object = manifest.as_object().ok_or_else(|| {
+        simple_error(
+            "k8s.publisher.receipt",
+            "renderer manifest must be a JSON object",
+        )
+    })?;
+    if object.contains_key("henosis") {
+        return Err(simple_error(
+            "k8s.publisher.receipt",
+            "renderer manifest already defines the reserved henosis field",
+        ));
+    }
+    Ok(())
 }
 
 fn render_command_error(output: &Output, desired: &DesiredSlice) -> EngineError {
@@ -1320,6 +1555,48 @@ mod tests {
     use crate::context::ImageContext;
     use crate::context::SourceContext;
     use crate::slice::ComponentPin;
+    use crate::slice::UpstreamOutput;
+
+    fn recipe_desired() -> DesiredSlice {
+        let component = ComponentPin {
+            spec_hash: [3; 32],
+            name: "service-a".into(),
+            context: ComponentContext {
+                api_version: API_VERSION.into(),
+                environment: EnvironmentContext { id: "dev".into() },
+                source: SourceContext {
+                    repository: "henosis-playground/service-a".into(),
+                    revision: "a".repeat(40),
+                },
+                image: ImageContext {
+                    digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            },
+        };
+        DesiredSlice {
+            graph_id: [2; 16],
+            generation: 4,
+            sequence: 9,
+            environment: "dev".into(),
+            components: IdOrdMap::from_iter_unique([component]).unwrap(),
+            upstream_outputs: IdOrdMap::new(),
+        }
+    }
+
+    fn recipe_key_for(desired: &DesiredSlice, runner: &PreparedRunner) -> String {
+        render_recipe_key(
+            desired,
+            &desired.manifest_toml(&desired.environment).unwrap(),
+            &desired.manifest_toml("dev").unwrap(),
+            runner,
+        )
+    }
+
+    fn make_executable(path: &Path) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).unwrap();
+    }
 
     #[test]
     fn external_command_diagnostic_preserves_stderr_verbatim() {
@@ -1365,6 +1642,146 @@ mod tests {
                 .is_err()
         );
         assert!(parse_deploy_repository("https://github.com/other/deploy.git").is_err());
+    }
+
+    #[test]
+    fn render_recipe_separates_occurrence_from_every_semantic_input() {
+        let desired = recipe_desired();
+        let runner = PreparedRunner {
+            entrypoint: "/cache/runner".into(),
+            platform_sha: "c".repeat(40),
+            prepare_recipe_digest: [4; 32],
+            entrypoint_digest: [5; 32],
+        };
+        let baseline = recipe_key_for(&desired, &runner);
+
+        let mut later_occurrence = desired.clone();
+        later_occurrence.graph_id = [8; 16];
+        later_occurrence.generation = 99;
+        later_occurrence.sequence = 100;
+        assert_eq!(baseline, recipe_key_for(&later_occurrence, &runner));
+
+        let mut changed_spec = desired.clone();
+        let mut component = changed_spec.components.iter().next().unwrap().clone();
+        component.spec_hash = [6; 32];
+        changed_spec.components = IdOrdMap::from_iter_unique([component]).unwrap();
+        assert_ne!(baseline, recipe_key_for(&changed_spec, &runner));
+
+        let mut changed_manifest = desired.clone();
+        let mut component = changed_manifest.components.iter().next().unwrap().clone();
+        component.context.source.revision = "d".repeat(40);
+        changed_manifest.components = IdOrdMap::from_iter_unique([component]).unwrap();
+        assert_ne!(baseline, recipe_key_for(&changed_manifest, &runner));
+
+        let mut changed_upstream = desired.clone();
+        changed_upstream.upstream_outputs = IdOrdMap::from_iter_unique([UpstreamOutput {
+            component_spec_hash: [7; 32],
+            values_json: br#"{"url":"https://example.test"}"#.to_vec(),
+        }])
+        .unwrap();
+        assert_ne!(baseline, recipe_key_for(&changed_upstream, &runner));
+
+        let mut changed_runner = runner.clone();
+        changed_runner.platform_sha = "e".repeat(40);
+        assert_ne!(baseline, recipe_key_for(&desired, &changed_runner));
+    }
+
+    #[test]
+    fn render_cache_excludes_generation_receipts() {
+        let raw = tempfile::tempdir().unwrap();
+        fs::write(
+            raw.path().join("manifest.json"),
+            br#"{"environment":"dev","components":{"service-a":{"outputs":{}}}}"#,
+        )
+        .unwrap();
+        let desired = recipe_desired();
+        let outputs = read_render_outputs(raw.path(), &desired).unwrap();
+        validate_generation_receipt_slot(raw.path()).unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = RenderCache::new(cache_root.path().into(), 1);
+        let key = "a".repeat(64);
+        cache.store(&key, raw.path()).unwrap();
+
+        embed_generation_receipt(raw.path(), &desired).unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        assert_eq!(
+            cache.restore(&key, restored.path()).unwrap(),
+            CacheLookup::Hit
+        );
+        let restored_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(restored.path().join("manifest.json")).unwrap())
+                .unwrap();
+        assert!(restored_manifest.get("henosis").is_none());
+        assert_eq!(
+            read_render_outputs(restored.path(), &desired).unwrap(),
+            outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_recipe_skips_renderer_but_embeds_a_fresh_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let runner_root = root.path().join("runner");
+        fs::create_dir_all(&runner_root).unwrap();
+        let entrypoint = runner_root.join("henosis-runner");
+        let counter = root.path().join("render-count");
+        fs::write(
+            &entrypoint,
+            format!(
+                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || printf 0)\nprintf '%s\\n' \"$((count \
+                 + 1))\" > '{}'\nmkdir -p \"$4\"\nprintf '%s\\n' \
+                 '{{\"environment\":\"dev\",\"components\":{{\"service-a\":{{\"outputs\":\
+                 {{}}}}}}}}' > \"$4/manifest.json\"\n",
+                counter.display(),
+                counter.display(),
+            ),
+        )
+        .unwrap();
+        make_executable(&entrypoint);
+        fs::write(
+            runner_root.join(".henosis-platform-sha"),
+            format!("{}\n", "c".repeat(40)),
+        )
+        .unwrap();
+        let prepare = root.path().join("prepare-runner");
+        fs::write(
+            &prepare,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", entrypoint.display()),
+        )
+        .unwrap();
+        make_executable(&prepare);
+        let engine = Engine::new(EngineConfig {
+            prepare_runner: prepare,
+            platform_ref: "origin/main".into(),
+            platform_checkout: root.path().join("checkout"),
+            runner_cache: root.path().join("runner-cache"),
+            deploy_remote: "https://github.com/henosis-playground/deploy.git".into(),
+            github_token_file: root.path().join("token"),
+            scratch_root: root.path().join("scratch"),
+            render_cache_max_entries: 4,
+            publication_policies: PublicationPolicies::default(),
+        })
+        .unwrap();
+        let desired = recipe_desired();
+
+        let first = engine.render(&desired).await.unwrap();
+        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
+        let first_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(first.output_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(first_manifest["henosis"]["generation"], "4");
+
+        let mut later_occurrence = desired;
+        later_occurrence.graph_id = [9; 16];
+        later_occurrence.generation = 5;
+        later_occurrence.sequence = 10;
+        let second = engine.render(&later_occurrence).await.unwrap();
+        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
+        let second_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(second.output_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(second_manifest["henosis"]["generation"], "5");
+        assert_eq!(second_manifest["henosis"]["graphId"], hex::encode([9; 16]));
     }
 
     #[test]

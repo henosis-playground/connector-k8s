@@ -18,3 +18,14 @@ pub const PUBLISHED_COMMIT: &str = "soter.henosis.publication.commit";
 pub const PUBLICATION_POLICY: &str = "soter.henosis.publication.policy";
 /// GitHub pull-request number rendered as a string ID.
 pub const PROPOSAL_NUMBER: &str = "soter.henosis.proposal.number";
+/// Bounded deterministic-render cache outcome (`hit`, `miss`, or
+/// `uncacheable`).
+pub const RENDER_CACHE_STATUS: &str = "soter.henosis.render.cache_status";
+/// Bounded explanation when a render could not use the cache.
+pub const RENDER_CACHE_REASON: &str = "soter.henosis.render.cache_reason";
+/// Complete semantic render-recipe BLAKE3 digest.
+pub const RENDER_RECIPE: &str = "soter.henosis.render.recipe";
+/// Immutable platform commit used by the prepared renderer.
+pub const RENDER_PLATFORM_SHA: &str = "soter.henosis.render.platform_sha";
+/// Number of oldest cache entries evicted by this render.
+pub const RENDER_CACHE_EVICTED_COUNT: &str = "soter.henosis.render.cache_evicted_count";

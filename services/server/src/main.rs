@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ),
         github_token_file: path_env("HENOSIS_GITHUB_TOKEN_FILE", "/run/secrets/github-pat"),
         scratch_root: state_dir.join("scratch"),
+        render_cache_max_entries: usize_env("HENOSIS_RENDER_CACHE_MAX_ENTRIES", 64)?,
         publication_policies: publication_policies()?,
     })?;
     let core_uri = string_env("HENOSIS_CORE_URL", "http://core:8080").parse::<Uri>()?;
@@ -103,6 +104,12 @@ fn string_env(name: &str, default: &str) -> String {
 
 fn path_env(name: &str, default: &str) -> PathBuf {
     PathBuf::from(string_env(name, default))
+}
+
+fn usize_env(name: &str, default: usize) -> Result<usize, std::num::ParseIntError> {
+    env::var(name)
+        .map(|value| value.parse())
+        .unwrap_or_else(|_| Ok(default))
 }
 
 fn publication_policies() -> Result<PublicationPolicies, serde_json::Error> {
