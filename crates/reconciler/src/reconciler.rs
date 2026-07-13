@@ -274,37 +274,39 @@ impl Connector for KubernetesConnector {
         }
 
         if let Some(pending) = &observed.state.proposal {
-            if pending.input_digest != digest {
+            if policy == PublicationPolicy::Direct {
                 return proposal(
                     ExecutablePlan::CancelProposal,
                     desired,
-                    "supersede stale review",
+                    "cancel review before direct publication",
                 );
             }
-            return match observed
-                .proposal_status
-                .as_ref()
-                .expect("proposal status accompanies a pending proposal")
-            {
-                ProposalStatus::Open => PlanOutcome::Waiting {
-                    diagnostics: vec![Diagnostic::info(
-                        "k8s.awaiting-review",
-                        pending.proposal.url.clone(),
-                    )],
-                    retry: Retry::after(Duration::from_secs(15)),
-                },
-                ProposalStatus::Merged(commit) => proposal(
-                    ExecutablePlan::RecordMerged {
-                        commit: commit.clone(),
+            if pending.input_digest == digest {
+                return match observed
+                    .proposal_status
+                    .as_ref()
+                    .expect("proposal status accompanies a pending proposal")
+                {
+                    ProposalStatus::Open => PlanOutcome::Waiting {
+                        diagnostics: vec![Diagnostic::info(
+                            "k8s.awaiting-review",
+                            pending.proposal.url.clone(),
+                        )],
+                        retry: Retry::after(Duration::from_secs(15)),
                     },
-                    desired,
-                    "record merged review",
-                ),
-                ProposalStatus::Closed => PlanOutcome::Failed(vec![Diagnostic::error(
-                    "k8s.review.closed",
-                    "the publication proposal was closed without merging",
-                )]),
-            };
+                    ProposalStatus::Merged(commit) => proposal(
+                        ExecutablePlan::RecordMerged {
+                            commit: commit.clone(),
+                        },
+                        desired,
+                        "record merged review",
+                    ),
+                    ProposalStatus::Closed => PlanOutcome::Failed(vec![Diagnostic::error(
+                        "k8s.review.closed",
+                        "the publication proposal was closed without merging",
+                    )]),
+                };
+            }
         }
 
         if observed.state.published && observed.state.input_digest == Some(digest) {
@@ -415,22 +417,30 @@ impl Connector for KubernetesConnector {
                     Ok(state) => state,
                     Err(error) => return engine_apply_failure(error),
                 };
-                let Some(pending) = state.proposal.take() else {
+                let Some(pending) = state.proposal.as_ref() else {
                     return ApplyOutcome::Stale(vec![Diagnostic::info(
                         "k8s.review.proposal_changed",
                         "pending proposal disappeared before merge recording",
                     )]);
                 };
+                if let Err(error) = self.engine.remove_proposal_branch(&pending.proposal).await {
+                    return ApplyOutcome::Waiting {
+                        diagnostics: error.diagnostics().to_vec(),
+                        retry: Retry::after(Duration::from_secs(15)),
+                    };
+                }
+                let pending = state
+                    .proposal
+                    .take()
+                    .expect("pending proposal was inspected");
                 state.input_digest = Some(pending.input_digest);
                 state.outputs = pending.outputs;
                 state.commit = Some(commit.clone());
                 state.published = true;
-                if let Err(error) = self.save(&desired.environment, &state) {
-                    return engine_apply_failure(error);
+                match self.save(&desired.environment, &state) {
+                    Ok(()) => ApplyOutcome::Progress(Vec::new()),
+                    Err(error) => engine_apply_failure(error),
                 }
-                // Proposal-branch cleanup after merge is intentionally best effort.
-                let _ = self.engine.remove_proposal_branch(&pending.proposal).await;
-                ApplyOutcome::Progress(Vec::new())
             }
             ExecutablePlan::CancelProposal => {
                 let mut state = match self.load(&desired.environment) {
