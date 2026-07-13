@@ -632,15 +632,17 @@ impl Engine {
             ));
         }
         if pull.merged_at.is_some() {
-            let commit = pull
-                .merge_commit_sha
-                .filter(|value| is_commit_sha(value))
-                .ok_or_else(|| {
-                    simple_error(
-                        "k8s.review.merge",
-                        "merged pull request omitted a valid merge commit identity",
-                    )
-                })?;
+            let Some(commit) = pull.merge_commit_sha else {
+                // GitHub can expose merged_at before merge_commit_sha converges.
+                // Keep polling rather than terminally failing an applied proposal.
+                return Ok(ProposalStatus::Open);
+            };
+            if !is_commit_sha(&commit) {
+                return Err(simple_error(
+                    "k8s.review.merge",
+                    "merged pull request returned an invalid merge commit identity",
+                ));
+            }
             return Ok(ProposalStatus::Merged(commit));
         }
         if pull.state == "open" {
