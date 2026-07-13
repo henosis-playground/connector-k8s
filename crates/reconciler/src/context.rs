@@ -20,7 +20,7 @@ pub struct ComponentContext {
     /// Immutable workload image pin.
     pub image: ImageContext,
     /// Explicit preview borrowing consent and effective stable environment.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borrow: Option<BorrowContext>,
 }
 

@@ -31,7 +31,10 @@ use crate::slice::DesiredSlice;
 
 const STRUCTURED_FAILURE_PREFIX: &str = "HENOSIS_GATE_REPORT:";
 const GITHUB_API_ROOT: &str = "https://api.github.com";
-const GITHUB_API_VERSION: &str = "2026-03-10";
+// The 2026-03-10 representation can permanently omit merge_commit_sha for
+// merged pull requests. This version preserves the commit identity required by
+// publication evidence and remains explicitly selected by GitHub.
+const GITHUB_API_VERSION: &str = "2022-11-28";
 
 /// How one environment's rendered tree becomes applied state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -625,31 +628,7 @@ impl Engine {
         proposal: &Proposal,
     ) -> Result<ProposalStatus, EngineError> {
         let pull = self.github.get_pull(proposal.number).await?;
-        if pull.head.sha != proposal.commit {
-            return Err(simple_error(
-                "k8s.review.proposal_changed",
-                "GitHub pull request head differs from the persisted proposed commit",
-            ));
-        }
-        if pull.merged_at.is_some() {
-            let Some(commit) = pull.merge_commit_sha else {
-                // GitHub can expose merged_at before merge_commit_sha converges.
-                // Keep polling rather than terminally failing an applied proposal.
-                return Ok(ProposalStatus::Open);
-            };
-            if !is_commit_sha(&commit) {
-                return Err(simple_error(
-                    "k8s.review.merge",
-                    "merged pull request returned an invalid merge commit identity",
-                ));
-            }
-            return Ok(ProposalStatus::Merged(commit));
-        }
-        if pull.state == "open" {
-            Ok(ProposalStatus::Open)
-        } else {
-            Ok(ProposalStatus::Closed)
-        }
+        classify_proposal_status(proposal, pull)
     }
 
     /// Close an unmerged proposal and remove its stable proposal branch.
@@ -833,6 +812,37 @@ struct PullRequest {
 #[derive(Debug, Deserialize)]
 struct PullHead {
     sha: String,
+}
+
+fn classify_proposal_status(
+    proposal: &Proposal,
+    pull: PullRequest,
+) -> Result<ProposalStatus, EngineError> {
+    if pull.head.sha != proposal.commit {
+        return Err(simple_error(
+            "k8s.review.proposal_changed",
+            "GitHub pull request head differs from the persisted proposed commit",
+        ));
+    }
+    if pull.merged_at.is_some() {
+        let Some(commit) = pull.merge_commit_sha else {
+            // GitHub can expose merged_at before merge_commit_sha converges.
+            // Keep polling rather than terminally failing an applied proposal.
+            return Ok(ProposalStatus::Open);
+        };
+        if !is_commit_sha(&commit) {
+            return Err(simple_error(
+                "k8s.review.merge",
+                "merged pull request returned an invalid merge commit identity",
+            ));
+        }
+        return Ok(ProposalStatus::Merged(commit));
+    }
+    if pull.state == "open" {
+        Ok(ProposalStatus::Open)
+    } else {
+        Ok(ProposalStatus::Closed)
+    }
 }
 
 impl GitHubApi {
@@ -1587,6 +1597,7 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "b".repeat(64)),
                 },
+                borrow: None,
             },
         };
         DesiredSlice {
@@ -1655,6 +1666,53 @@ mod tests {
                 .is_err()
         );
         assert!(parse_deploy_repository("https://github.com/other/deploy.git").is_err());
+    }
+
+    #[test]
+    fn github_api_version_preserves_merged_commit_identity() {
+        assert_eq!(GITHUB_API_VERSION, "2022-11-28");
+    }
+
+    #[test]
+    fn merged_pull_without_identity_retries_until_identity_converges() {
+        let proposal_commit = "a".repeat(40);
+        let proposal = Proposal {
+            number: 7,
+            url: "https://github.com/henosis-playground/deploy/pull/7".into(),
+            commit: proposal_commit.clone(),
+            target_branch: "env/dev".into(),
+            proposal_branch: "henosis/proposals/dev".into(),
+        };
+        let transient = PullRequest {
+            number: 7,
+            html_url: proposal.url.clone(),
+            state: "closed".into(),
+            merged_at: Some("2026-07-13T16:03:52Z".into()),
+            merge_commit_sha: None,
+            head: PullHead {
+                sha: proposal_commit.clone(),
+            },
+        };
+        assert_eq!(
+            classify_proposal_status(&proposal, transient).unwrap(),
+            ProposalStatus::Open
+        );
+
+        let merge_commit = "b".repeat(40);
+        let converged = PullRequest {
+            number: 7,
+            html_url: proposal.url.clone(),
+            state: "closed".into(),
+            merged_at: Some("2026-07-13T16:03:52Z".into()),
+            merge_commit_sha: Some(merge_commit.clone()),
+            head: PullHead {
+                sha: proposal_commit,
+            },
+        };
+        assert_eq!(
+            classify_proposal_status(&proposal, converged).unwrap(),
+            ProposalStatus::Merged(merge_commit)
+        );
     }
 
     #[test]
@@ -1818,6 +1876,7 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "b".repeat(64)),
                 },
+                borrow: None,
             },
         };
         let desired = DesiredSlice {
@@ -1861,6 +1920,7 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "c".repeat(64)),
                 },
+                borrow: None,
             },
         };
         let desired = DesiredSlice {
