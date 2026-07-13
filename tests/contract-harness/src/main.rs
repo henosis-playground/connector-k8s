@@ -19,6 +19,7 @@ use connector_sdk::henosis_proto::proto::henosis::v1::ReconcileSliceRequest;
 use connector_sdk::henosis_proto::proto::henosis::v1::RegisteredComponentSpec;
 use connector_sdk::henosis_proto::proto::henosis::v1::ReportSliceRequest;
 use connector_sdk::henosis_proto::proto::henosis::v1::ReportSliceResponse;
+use connector_sdk::henosis_proto::proto::henosis::v1::RetireSliceRequest;
 use connectrpc::ConnectError;
 use connectrpc::ErrorCode;
 use connectrpc::RequestContext;
@@ -114,6 +115,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or_else(|_| "preview_3jhc7x633z88188fzqhcbbrf84".into());
     let expect_cycle = env::var("HENOSIS_EXPECT_REPORT").as_deref() == Ok("review-cycle");
 
+    if env::var("HENOSIS_ACTION").as_deref() == Ok("retire") {
+        let client =
+            ConnectorServiceClient::new(HttpClient::plaintext(), ClientConfig::new(connector_uri));
+        let retired_generation = tokio::time::timeout(Duration::from_secs(1_200), async {
+            loop {
+                match client.retire_slice(retire_request()).await {
+                    Ok(response) => {
+                        break response
+                            .view()
+                            .retired_generation
+                            .ok_or("connector omitted retired_generation");
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
+            }
+        })
+        .await??;
+        if let Some(parent) = evidence_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            evidence_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "environment": environment,
+                "retiredGeneration": retired_generation,
+            }))?,
+        )?;
+        return Ok(());
+    }
+
     let request = live_request(&environment)?;
     let slice = request
         .slice
@@ -199,6 +230,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = shutdown_tx.send(());
     server_task.await??;
     Ok(())
+}
+
+fn retire_request() -> RetireSliceRequest {
+    let graph_byte = env::var("HENOSIS_GRAPH_BYTE")
+        .ok()
+        .and_then(|value| u8::from_str_radix(&value, 16).ok())
+        .unwrap_or(0x72);
+    RetireSliceRequest {
+        slice: MessageField::some(GraphSlice {
+            graph_id: Some(vec![graph_byte; 16]),
+            generation: Some(
+                env::var("HENOSIS_GENERATION")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(1),
+            ),
+            connector: Some(CONNECTOR_NAME.into()),
+            sequence: Some(
+                env::var("HENOSIS_SEQUENCE")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            ),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 fn live_request(environment: &str) -> Result<ReconcileSliceRequest, serde_json::Error> {
