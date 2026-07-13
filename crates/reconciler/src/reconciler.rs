@@ -356,9 +356,11 @@ impl Reconciler {
     ) -> Result<u64, ReconcileError> {
         let lock = self.graph_lock(graph_id).await;
         let _guard = lock.lock().await;
-        let mut state = self
-            .load(graph_id)?
-            .ok_or_else(|| ReconcileError::State("cannot retire an unknown graph slice".into()))?;
+        let Some(mut state) = self.load(graph_id)? else {
+            // Retirement is level-triggered deletion. A request can race
+            // local acceptance; absence already satisfies the desired level.
+            return Ok(generation);
+        };
         let retained_generation = state.desired.generation;
         if generation != retained_generation {
             return Err(ReconcileError::State(format!(
@@ -927,6 +929,27 @@ mod tests {
     use henosis_proto::proto::henosis::v1::ComponentOutputs;
 
     use super::*;
+    use crate::engine::EngineConfig;
+    use crate::engine::PublicationPolicies;
+
+    struct UnusedReporter;
+
+    impl Reporter for UnusedReporter {
+        fn report(
+            &self,
+            _request: ReportSliceRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ReportError>> + Send + '_>> {
+            Box::pin(async { panic!("reporter is not used by an absent retirement") })
+        }
+
+        fn fetch_slice(
+            &self,
+            _graph_id: [u8; 16],
+            _sequence: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<GraphSlice, ReportError>> + Send + '_>> {
+            Box::pin(async { panic!("reporter is not used by an absent retirement") })
+        }
+    }
 
     fn ready_report(sequence: u64, values: &[u8]) -> SliceReport {
         SliceReport {
@@ -962,5 +985,34 @@ mod tests {
     #[test]
     fn non_publishing_report_has_no_publication_identity() {
         assert_eq!(stable_publication_id(&SliceReport::default()), None);
+    }
+
+    #[tokio::test]
+    async fn retirement_before_local_acceptance_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            prepare_runner: root.path().join("unused-prepare-runner"),
+            platform_ref: "origin/main".into(),
+            platform_checkout: root.path().join("platform"),
+            runner_cache: root.path().join("runner-cache"),
+            deploy_remote: "https://github.com/henosis-playground/deploy.git".into(),
+            github_token_file: root.path().join("unused-token"),
+            scratch_root: root.path().join("scratch"),
+            render_cache_max_entries: 1,
+            publication_policies: PublicationPolicies::default(),
+        })
+        .unwrap();
+        let state_dir = root.path().join("state");
+        let reconciler = Reconciler::new(
+            ReconcilerConfig {
+                state_dir: state_dir.clone(),
+            },
+            engine,
+            Arc::new(UnusedReporter),
+        )
+        .unwrap();
+
+        assert_eq!(reconciler.retire([1; 16], 7, 1).await.unwrap(), 7);
+        assert!(fs::read_dir(state_dir).unwrap().next().is_none());
     }
 }
