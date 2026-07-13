@@ -283,9 +283,9 @@ impl Engine {
         if self.render_cache.enabled() {
             match self.render_cache.restore(&recipe, &output_dir) {
                 Ok(CacheLookup::Hit) => {
-                    match read_render_outputs(&output_dir, desired).and_then(|outputs| {
-                        validate_generation_receipt_slot(&output_dir).map(|()| outputs)
-                    }) {
+                    match read_render_outputs(&output_dir, desired, effective_environment).and_then(
+                        |outputs| validate_generation_receipt_slot(&output_dir).map(|()| outputs),
+                    ) {
                         Ok(outputs) => {
                             embed_generation_receipt(&output_dir, desired)?;
                             return Ok(RenderedWorld {
@@ -332,7 +332,7 @@ impl Engine {
         if !rendered.status.success() {
             return Err(render_command_error(&rendered, desired));
         }
-        let outputs = read_render_outputs(&output_dir, desired)?;
+        let outputs = read_render_outputs(&output_dir, desired, effective_environment)?;
         validate_generation_receipt_slot(&output_dir)?;
         if self.render_cache.enabled() {
             match self.render_cache.store(&recipe, &output_dir) {
@@ -1133,12 +1133,13 @@ fn reset_render_output(output_dir: &Path) -> Result<(), EngineError> {
 fn read_render_outputs(
     output_dir: &Path,
     desired: &DesiredSlice,
+    expected_environment: &str,
 ) -> Result<Vec<ComponentOutputs>, EngineError> {
     let bytes = fs::read(output_dir.join("manifest.json"))
         .map_err(|error| io_error("k8s.renderer.output", "read renderer manifest", error))?;
     let manifest: RendererManifest = serde_json::from_slice(&bytes)
         .map_err(|error| simple_error("k8s.renderer.output", &error.to_string()))?;
-    if manifest.environment != desired.environment {
+    if manifest.environment != expected_environment {
         return Err(simple_error(
             "k8s.renderer.output",
             "renderer returned a different environment identity",
@@ -1711,7 +1712,7 @@ mod tests {
         )
         .unwrap();
         let desired = recipe_desired();
-        let outputs = read_render_outputs(raw.path(), &desired).unwrap();
+        let outputs = read_render_outputs(raw.path(), &desired, &desired.environment).unwrap();
         validate_generation_receipt_slot(raw.path()).unwrap();
         let cache_root = tempfile::tempdir().unwrap();
         let cache = RenderCache::new(cache_root.path().into(), 1);
@@ -1729,7 +1730,7 @@ mod tests {
                 .unwrap();
         assert!(restored_manifest.get("henosis").is_none());
         assert_eq!(
-            read_render_outputs(restored.path(), &desired).unwrap(),
+            read_render_outputs(restored.path(), &desired, &desired.environment).unwrap(),
             outputs
         );
     }
