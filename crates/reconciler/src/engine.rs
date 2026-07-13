@@ -244,8 +244,11 @@ impl Engine {
     /// Provision the real platform runner and render a complete world in
     /// isolation.
     pub async fn render(&self, desired: &DesiredSlice) -> Result<RenderedWorld, EngineError> {
+        let effective_environment = desired
+            .borrowed_environment()
+            .unwrap_or(&desired.environment);
         let desired_manifest = desired
-            .manifest_toml(&desired.environment)
+            .manifest_toml(effective_environment)
             .map_err(|error| simple_error("k8s.context.invalid", &error.to_string()))?;
         let dev_manifest = desired
             .manifest_toml("dev")
@@ -662,6 +665,18 @@ impl Engine {
             ["push", &lease, "origin", &format!(":{proposal_ref}")],
         )
         .await
+    }
+
+    /// Resolve the immutable deploy revision currently backing an environment.
+    pub async fn applied_revision(&self, environment: &str) -> Result<String, EngineError> {
+        let repository = self.git_repository(environment).await?;
+        if repository.expected_sha.is_empty() {
+            return Err(simple_error(
+                "k8s.publisher.git",
+                &format!("borrow target environment {environment:?} has no rendered branch"),
+            ));
+        }
+        Ok(repository.expected_sha)
     }
 
     /// Delete an environment branch if it exists.
@@ -1571,6 +1586,7 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "b".repeat(64)),
                 },
+                borrow: None,
             },
         };
         DesiredSlice {
@@ -1805,6 +1821,7 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "b".repeat(64)),
                 },
+                borrow: None,
             },
         };
         let desired = DesiredSlice {
@@ -1848,6 +1865,7 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "c".repeat(64)),
                 },
+                borrow: None,
             },
         };
         let desired = DesiredSlice {

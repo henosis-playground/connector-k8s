@@ -230,6 +230,21 @@ impl DesiredSlice {
         })
     }
 
+    /// Stable environment borrowed by every component in this slice.
+    pub fn borrowed_environment(&self) -> Option<&str> {
+        let mut borrowed = self.components.iter().map(|component| {
+            component
+                .context
+                .borrow
+                .as_ref()
+                .map(|borrow| borrow.effective_environment.id.as_str())
+        });
+        let first = borrowed.next()??;
+        borrowed
+            .all(|environment| environment == Some(first))
+            .then_some(first)
+    }
+
     /// Serialize the desired environment as deterministic platform TOML.
     pub fn manifest_toml(&self, environment: &str) -> Result<String, SliceError> {
         let manifest = RenderManifest {
@@ -406,6 +421,7 @@ mod tests {
             image: ImageContext {
                 digest: format!("sha256:{}", "b".repeat(64)),
             },
+            borrow: None,
         };
         let spec = ComponentSpec {
             name: Some("service-a".into()),

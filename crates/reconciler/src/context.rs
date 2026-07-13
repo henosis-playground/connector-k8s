@@ -19,6 +19,19 @@ pub struct ComponentContext {
     pub source: SourceContext,
     /// Immutable workload image pin.
     pub image: ImageContext,
+    /// Explicit preview borrowing consent and effective stable environment.
+    #[serde(default)]
+    pub borrow: Option<BorrowContext>,
+}
+
+/// Preview borrowing evidence supplied by the collector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BorrowContext {
+    /// Stable environment selected by `borrowForPreview`.
+    pub from: String,
+    /// Exact effective environment used to compute outputs.
+    pub effective_environment: EnvironmentContext,
 }
 
 /// Environment fields required by the renderer and publisher.
@@ -90,6 +103,25 @@ impl ComponentContext {
             return Err(ContextError::Invalid(
                 "image.digest must contain 64 lowercase hexadecimal characters".into(),
             ));
+        }
+        if let Some(borrow) = &self.borrow {
+            if !self.environment.id.starts_with("preview_") {
+                return Err(ContextError::Invalid(
+                    "borrow is only valid for preview environments".into(),
+                ));
+            }
+            validate_dns_label(&borrow.from, "borrow.from")?;
+            validate_environment_id(&borrow.effective_environment.id)?;
+            if borrow.from != borrow.effective_environment.id {
+                return Err(ContextError::Invalid(
+                    "borrow.from must equal borrow.effectiveEnvironment.id".into(),
+                ));
+            }
+            if borrow.from == "preview" || borrow.from.starts_with("preview-") {
+                return Err(ContextError::Invalid(
+                    "borrow.from must name a stable environment".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -187,6 +219,7 @@ mod tests {
             image: ImageContext {
                 digest: format!("sha256:{}", "b".repeat(64)),
             },
+            borrow: None,
         }
     }
 
@@ -206,6 +239,17 @@ mod tests {
             context.environment.id = id.into();
             assert!(context.validate().is_err(), "accepted {id}");
         }
+    }
+
+    #[test]
+    fn accepts_explicit_preview_borrowing() {
+        let mut context = valid_context();
+        context.borrow = Some(BorrowContext {
+            from: "dev".into(),
+            effective_environment: EnvironmentContext { id: "dev".into() },
+        });
+
+        context.validate().unwrap();
     }
 
     #[test]

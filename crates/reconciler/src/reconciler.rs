@@ -380,7 +380,9 @@ impl Reconciler {
         if let Some(proposal) = &state.proposal {
             self.engine.cancel_proposal(&proposal.proposal).await?;
         }
-        self.engine.remove(&state.environment).await?;
+        if state.desired.borrowed_environment().is_none() {
+            self.engine.remove(&state.environment).await?;
+        }
         state.retired = true;
         state.published = None;
         state.proposal = None;
@@ -590,7 +592,18 @@ impl Reconciler {
                 return Ok(());
             }
 
-            let result = if desired.components.is_empty() {
+            let result = if let Some(borrowed_environment) = desired.borrowed_environment() {
+                match self.engine.render(&desired).await {
+                    Ok(world) => {
+                        world.record_cache_telemetry();
+                        self.engine
+                            .applied_revision(borrowed_environment)
+                            .await
+                            .map(|commit| (world.outputs, Some(commit)))
+                    }
+                    Err(error) => Err(error),
+                }
+            } else if desired.components.is_empty() {
                 if policy == PublicationPolicy::Direct {
                     self.engine
                         .remove(&desired.environment)

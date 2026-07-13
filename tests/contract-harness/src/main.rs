@@ -264,6 +264,7 @@ fn component(
         image: ImageContext {
             digest: digest.into(),
         },
+        borrow: None,
     };
     let spec = ComponentSpec {
         name: Some(name.into()),
