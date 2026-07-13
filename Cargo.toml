@@ -16,11 +16,10 @@ rust-version = "1.96.0"
 publish = false
 
 [workspace.dependencies]
+async-trait = "0.1.89"
 buffa = "0.8.1"
 blake3 = "1.8.2"
-axum = "0.8.4"
 connectrpc = { version = "0.8.1", features = ["axum", "client", "server"] }
-faultline = "0.1.0"
 hex = "0.4.3"
 http = "1.3.1"
 iddqd = { version = "0.4.5", features = ["serde"] }
@@ -48,7 +47,8 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 uuid = { version = "1.17.0", features = ["v5", "v7"] }
 
-henosis-proto = { git = "https://github.com/henosis-playground/core.git", branch = "fix/verification-loop-1" }
+connector-sdk = { git = "https://github.com/henosis-playground/connector-sdk.git", rev = "74d301620a5f4a57e2a5f696e37c716b62ec5d8d" }
+connector-sdk-conformance = { git = "https://github.com/henosis-playground/connector-sdk.git", rev = "74d301620a5f4a57e2a5f696e37c716b62ec5d8d" }
 
 henosis-k8s-reconciler = { path = "crates/reconciler" }
 

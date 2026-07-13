@@ -10,9 +10,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Output;
 
-use henosis_proto::proto::henosis::v1::ComponentOutputs;
-use henosis_proto::proto::henosis::v1::Diagnostic;
-use henosis_proto::proto::henosis::v1::DiagnosticSeverity;
+use connector_sdk::ContractFailureDetail;
+use connector_sdk::ContractFailureKind;
+use connector_sdk::Diagnostic;
+use connector_sdk::Output as ComponentOutput;
+use connector_sdk::Publication;
 use reqwest::Method;
 use serde::Deserialize;
 use serde::Serialize;
@@ -23,6 +25,7 @@ use tracing::Span;
 
 use crate::render_cache::CacheLookup;
 use crate::render_cache::RenderCache;
+use crate::render_cache::tree_digest;
 use crate::review::ReviewProjection;
 use crate::slice::DesiredSlice;
 
@@ -95,7 +98,9 @@ pub struct RenderedWorld {
     /// Root containing only publishable renderer output.
     pub output_dir: PathBuf,
     /// Complete deterministic component outputs.
-    pub outputs: Vec<ComponentOutputs>,
+    pub outputs: Vec<ComponentOutput>,
+    /// Digest of every path and byte in the exact rendered publication tree.
+    pub tree_digest: String,
     cache: RenderCacheObservation,
 }
 
@@ -173,6 +178,14 @@ pub struct EngineError {
 }
 
 impl EngineError {
+    /// Construct one target-adapter failure from a stable diagnostic.
+    pub fn from_diagnostic(diagnostic: Diagnostic) -> Self {
+        Self {
+            summary: diagnostic.message.clone(),
+            diagnostics: vec![diagnostic],
+        }
+    }
+
     /// Diagnostics suitable for a FAILED atomic slice report.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
@@ -227,17 +240,13 @@ impl Engine {
     }
 
     /// Build immutable browser evidence for one exact deploy revision.
-    pub fn publication_evidence(
-        &self,
-        revision: &str,
-    ) -> henosis_proto::proto::henosis::v1::PublicationEvidence {
-        henosis_proto::proto::henosis::v1::PublicationEvidence {
-            revision: Some(revision.to_owned()),
-            uri: Some(format!(
+    pub fn publication_evidence(&self, revision: &str) -> Publication {
+        Publication {
+            revision: revision.to_owned(),
+            uri: format!(
                 "https://github.com/{}/{}/commit/{revision}",
                 self.github.repository.owner, self.github.repository.name
-            )),
-            ..Default::default()
+            ),
         }
     }
 
@@ -288,10 +297,14 @@ impl Engine {
                     ) {
                         Ok(outputs) => {
                             embed_generation_receipt(&output_dir, desired)?;
+                            let tree_digest = tree_digest(&output_dir).map_err(|error| {
+                                io_error("k8s.renderer.output", "digest rendered tree", error)
+                            })?;
                             return Ok(RenderedWorld {
                                 _temporary: temporary,
                                 output_dir,
                                 outputs,
+                                tree_digest,
                                 cache: RenderCacheObservation {
                                     status: "hit",
                                     reason: None,
@@ -344,10 +357,13 @@ impl Engine {
             }
         }
         embed_generation_receipt(&output_dir, desired)?;
+        let tree_digest = tree_digest(&output_dir)
+            .map_err(|error| io_error("k8s.renderer.output", "digest rendered tree", error))?;
         Ok(RenderedWorld {
             _temporary: temporary,
             output_dir,
             outputs,
+            tree_digest,
             cache: RenderCacheObservation {
                 status: cache_status,
                 reason: cache_reason,
@@ -616,15 +632,16 @@ impl Engine {
             ));
         }
         if pull.merged_at.is_some() {
-            let environment = proposal_branch_environment(&proposal.proposal_branch)?;
-            let repository = self.git_repository(&environment).await?;
-            if repository.expected_sha.is_empty() {
-                return Err(simple_error(
-                    "k8s.review.merge",
-                    "merged proposal target branch is missing",
-                ));
-            }
-            return Ok(ProposalStatus::Merged(repository.expected_sha));
+            let commit = pull
+                .merge_commit_sha
+                .filter(|value| is_commit_sha(value))
+                .ok_or_else(|| {
+                    simple_error(
+                        "k8s.review.merge",
+                        "merged pull request omitted a valid merge commit identity",
+                    )
+                })?;
+            return Ok(ProposalStatus::Merged(commit));
         }
         if pull.state == "open" {
             Ok(ProposalStatus::Open)
@@ -807,6 +824,7 @@ struct PullRequest {
     html_url: String,
     state: String,
     merged_at: Option<String>,
+    merge_commit_sha: Option<String>,
     head: PullHead,
 }
 
@@ -1134,7 +1152,7 @@ fn read_render_outputs(
     output_dir: &Path,
     desired: &DesiredSlice,
     expected_environment: &str,
-) -> Result<Vec<ComponentOutputs>, EngineError> {
+) -> Result<Vec<ComponentOutput>, EngineError> {
     let bytes = fs::read(output_dir.join("manifest.json"))
         .map_err(|error| io_error("k8s.renderer.output", "read renderer manifest", error))?;
     let manifest: RendererManifest = serde_json::from_slice(&bytes)
@@ -1160,16 +1178,14 @@ fn read_render_outputs(
         .components
         .into_iter()
         .map(|(name, rendered)| {
-            let spec_hash = desired
+            let component_spec_hash = desired
                 .component_named(&name)
                 .expect("renderer component set was checked")
-                .spec_hash
-                .to_vec();
-            let values = serde_json::to_vec(&rendered.outputs)
-                .map_err(|error| simple_error("k8s.renderer.output", &error.to_string()))?;
-            Ok(ComponentOutputs::default()
-                .with_component_spec_hash(spec_hash)
-                .with_values_json(values))
+                .spec_hash;
+            Ok(ComponentOutput {
+                component_spec_hash,
+                values: rendered.outputs,
+            })
         })
         .collect()
 }
@@ -1262,39 +1278,29 @@ fn failure_diagnostic(failure: GateFailure, desired: &DesiredSlice) -> Diagnosti
         .rev()
         .find_map(|line| serde_json::from_str::<ValidationIssue>(line).ok())
     {
-        let mut diagnostic = Diagnostic::default()
-            .with_code(issue.code)
-            .with_message(issue.message)
-            .with_severity(DiagnosticSeverity::Error);
+        let mut diagnostic =
+            Diagnostic::error(issue.code, issue.message).contract_failure(contract_failure);
         if let Some(pin) = desired.component_named(&issue.component) {
-            diagnostic = diagnostic.with_component_spec_hash(pin.spec_hash.to_vec());
+            diagnostic = diagnostic.component(pin.spec_hash);
         }
         if let Some(record) = issue.record {
-            diagnostic = diagnostic.with_pointer(record.path);
+            diagnostic = diagnostic.pointer(record.path);
         }
         if let Some(help) = issue.help {
-            diagnostic = diagnostic.with_help(help);
+            diagnostic = diagnostic.help(help);
         }
-        diagnostic.contract_failure = buffa::MessageField::some(contract_failure);
         return diagnostic;
     }
-    let mut diagnostic = Diagnostic::default()
-        .with_code(format!("k8s.renderer.{}", failure.kind))
-        .with_message(failure.message)
-        .with_severity(DiagnosticSeverity::Error);
-    diagnostic.contract_failure = buffa::MessageField::some(contract_failure);
+    let mut diagnostic =
+        Diagnostic::error(format!("k8s.renderer.{}", failure.kind), failure.message)
+            .contract_failure(contract_failure);
     if let Some(pin) = desired.component_named(&failure.consumer) {
-        diagnostic = diagnostic.with_component_spec_hash(pin.spec_hash.to_vec());
+        diagnostic = diagnostic.component(pin.spec_hash);
     }
     diagnostic
 }
 
-fn contract_failure_detail(
-    failure: &GateFailure,
-    desired: &DesiredSlice,
-) -> henosis_proto::proto::henosis::v1::ContractFailureDetail {
-    use henosis_proto::proto::henosis::v1::ContractFailureKind;
-
+fn contract_failure_detail(failure: &GateFailure, desired: &DesiredSlice) -> ContractFailureDetail {
     let kind = match failure.kind.as_str() {
         "compile" => ContractFailureKind::Compile,
         "render" => ContractFailureKind::Render,
@@ -1310,25 +1316,27 @@ fn contract_failure_detail(
                 "https://github.com/{}/blob/{}/henosis/src/index.ts#L{line}",
                 pin.context.source.repository, pin.context.source.revision
             )
-        });
-    henosis_proto::proto::henosis::v1::ContractFailureDetail {
-        consumer: Some(failure.consumer.clone()),
-        producer: Some(failure.producer.clone()),
-        pinned_sha: failure.pinned_sha.clone(),
-        resolved_sha: failure.resolved_sha.clone(),
+        })
+        .unwrap_or_default();
+    ContractFailureDetail {
+        consumer: failure.consumer.clone(),
+        producer: failure.producer.clone(),
+        pinned_sha: failure.pinned_sha.clone().unwrap_or_default(),
+        resolved_sha: failure.resolved_sha.clone().unwrap_or_default(),
         outputs_schema_at_pinned_json: failure
             .outputs_schema_at_pinned
             .as_ref()
-            .and_then(|schema| serde_json::to_vec(schema).ok()),
+            .and_then(|schema| serde_json::to_vec(schema).ok())
+            .unwrap_or_default(),
         outputs_schema_at_resolved_json: failure
             .outputs_schema_at_resolved
             .as_ref()
-            .and_then(|schema| serde_json::to_vec(schema).ok()),
+            .and_then(|schema| serde_json::to_vec(schema).ok())
+            .unwrap_or_default(),
         consumed_paths: failure.consumed_paths.clone(),
-        kind: Some(kind.into()),
-        excerpt: Some(failure.excerpt.clone()),
+        kind,
+        excerpt: failure.excerpt.clone(),
         source_url,
-        ..Default::default()
     }
 }
 
@@ -1525,12 +1533,7 @@ fn truncate(value: &str, maximum: usize) -> &str {
 fn simple_error(code: &str, message: &str) -> EngineError {
     EngineError {
         summary: message.into(),
-        diagnostics: vec![
-            Diagnostic::default()
-                .with_code(code)
-                .with_message(message)
-                .with_severity(DiagnosticSeverity::Error),
-        ],
+        diagnostics: vec![Diagnostic::error(code, message)],
     }
 }
 
@@ -1549,12 +1552,7 @@ fn command_error(code: &str, action: &str, output: &Output) -> EngineError {
     };
     EngineError {
         summary: format!("{action} failed"),
-        diagnostics: vec![
-            Diagnostic::default()
-                .with_code(code)
-                .with_message(message)
-                .with_severity(DiagnosticSeverity::Error),
-        ],
+        diagnostics: vec![Diagnostic::error(code, message)],
     }
 }
 
@@ -1587,7 +1585,6 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "b".repeat(64)),
                 },
-                borrow: None,
             },
         };
         DesiredSlice {
@@ -1623,10 +1620,7 @@ mod tests {
             stderr: b"first line\nsecond line\n".to_vec(),
         };
         let error = command_error("k8s.test", "test command", &output);
-        assert_eq!(
-            error.diagnostics()[0].message.as_deref(),
-            Some("first line\nsecond line\n")
-        );
+        assert_eq!(error.diagnostics()[0].message, "first line\nsecond line\n");
     }
 
     #[test]
@@ -1822,7 +1816,6 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "b".repeat(64)),
                 },
-                borrow: None,
             },
         };
         let desired = DesiredSlice {
@@ -1866,7 +1859,6 @@ mod tests {
                 image: ImageContext {
                     digest: format!("sha256:{}", "c".repeat(64)),
                 },
-                borrow: None,
             },
         };
         let desired = DesiredSlice {
@@ -1897,25 +1889,19 @@ mod tests {
         };
 
         let diagnostic = failure_diagnostic(failure, &desired);
-        let detail = diagnostic.contract_failure.as_option().unwrap();
-        assert_eq!(detail.consumer.as_deref(), Some("service-b"));
-        assert_eq!(detail.producer.as_deref(), Some("service-a"));
+        let detail = diagnostic.contract_failure.as_ref().unwrap();
+        assert_eq!(detail.consumer, "service-b");
+        assert_eq!(detail.producer, "service-a");
         assert_eq!(detail.consumed_paths, ["api", "port"]);
-        assert_eq!(detail.pinned_sha.as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(detail.pinned_sha, "a".repeat(40));
+        assert_eq!(detail.resolved_sha, "d".repeat(40));
+        assert!(!detail.outputs_schema_at_pinned_json.is_empty());
+        assert!(!detail.outputs_schema_at_resolved_json.is_empty());
         assert_eq!(
-            detail.resolved_sha.as_deref(),
-            Some("d".repeat(40).as_str())
-        );
-        assert!(detail.outputs_schema_at_pinned_json.is_some());
-        assert!(detail.outputs_schema_at_resolved_json.is_some());
-        assert_eq!(
-            detail.source_url.as_deref(),
-            Some(
-                format!(
+            detail.source_url,
+            format!(
                 "https://github.com/henosis-playground/service-b/blob/{}/henosis/src/index.ts#L25",
                 "b".repeat(40)
-            )
-                .as_str()
             )
         );
     }

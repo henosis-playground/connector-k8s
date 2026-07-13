@@ -229,6 +229,24 @@ mod tests {
     }
 
     #[test]
+    fn context_v1_bytes_are_a_fixed_producer_contract() {
+        let bytes = serde_json::to_vec(&valid_context()).unwrap();
+        let expected = format!(
+            "{{\"apiVersion\":\"henosis.dev/k8s-component-context/v1\",\"environment\":{{\"id\":\"\
+             preview_3jhc7x633z88188fzqhcbbrf84\"}},\"source\":{{\"repository\":\"\
+             henosis-playground/service-a\",\"revision\":\"{}\"}},\"image\":{{\"digest\":\"sha256:\
+             {}\"}}}}",
+            "a".repeat(40),
+            "b".repeat(64)
+        );
+        assert_eq!(bytes, expected.as_bytes());
+        assert_eq!(
+            ComponentContext::from_bytes(&bytes).unwrap(),
+            valid_context()
+        );
+    }
+
+    #[test]
     fn rejects_legacy_and_noncanonical_preview_ids() {
         for id in [
             "preview-728b0fd3-0c7f-4202-843f-f78b16bc3d04",

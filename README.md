@@ -2,10 +2,11 @@
 
 The Henosis Kubernetes reconciler.
 
-The service implements the generated `henosis.v1.ConnectorService` contract. It durably accepts
-complete graph slices, provisions the real platform renderer through the D24 `prepare-runner.sh`
-recipe, renders and validates the whole Kubernetes world, atomically publishes the result to the
-deploy repository's `env/<environment>` branch, and reports one complete observation to core.
+The service implements Kubernetes target semantics on the shared `connector-sdk` runtime. The SDK
+owns the generated `henosis.v1.ConnectorService` boundary, durable accepted levels, scheduling,
+report construction/replay, and process bootstrap. This connector provisions the real platform
+renderer through the D24 `prepare-runner.sh` recipe, renders and validates the whole Kubernetes
+world, and publishes it directly or through a pull-request gate to `env/<environment>`.
 
 The connector-owned bytes that authoring and collector integrations place in
 `ComponentSpec.connector_context` are specified in
@@ -32,7 +33,7 @@ and core reporting always execute live.
 | `HENOSIS_BIND` | `0.0.0.0:8081` | ConnectRPC listen address |
 | `HENOSIS_CORE_URL` | `http://core:8080` | Core callback service origin |
 | `HENOSIS_CORE_TOKEN` | unset | Optional bearer token for core callback and recovery RPCs |
-| `HENOSIS_STATE_DIR` | `/var/lib/henosis-connector-k8s/state` | Durable accepted levels and publication checkpoints |
+| `HENOSIS_STATE_DIR` | `/var/lib/henosis-connector-k8s/state-sdk-v1` | Fresh SDK checkpoints, plans/reviews, target proposal state, and scratch data |
 | `HENOSIS_PREPARE_RUNNER` | `/opt/henosis/platform/scripts/prepare-runner.sh` | Platform D24 recipe |
 | `HENOSIS_PLATFORM_REF` | `origin/main` | Platform ref resolved to an immutable SHA per invocation |
 | `HENOSIS_PLATFORM_CHECKOUT` | `/var/lib/henosis-connector-k8s/platform` | Recipe-managed platform checkout |

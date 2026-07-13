@@ -8,12 +8,6 @@ publish.workspace = true
 description = "workspace-hack package, managed by hakari"
 
 ### BEGIN HAKARI SECTION
-[dependencies]
-serde_core = { version = "1", features = ["alloc"] }
-
-[build-dependencies]
-serde_core = { version = "1", features = ["alloc"] }
-
 ### END HAKARI SECTION
 
 [lints]
